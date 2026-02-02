@@ -19,9 +19,9 @@
 
 import os
 import pwd
-import shutil
 import string
 from pathlib import Path
+from shutil import rmtree
 from typing import Optional
 
 from autosubmit.config.basicconfig import BasicConfig
@@ -97,20 +97,38 @@ def new_experiment(description, version, test=False, operational=False, evaluati
                                  7011) from e
 
 
-def delete_experiment(expid: str, force: bool) -> bool:
+def delete_experiment(expids: str, force: bool) -> bool:
     """Deletes an experiment from the database,
     the experiment's folder database entry and all the related metadata files.
 
-    :param expid: Identifier of the experiment to delete.
-    :type expid: str
-    :param force: If True, does not ask for confirmation.
-    :type force: bool
-
-    :returns: True if successful, False otherwise.
-    :rtype: bool
-
+    :param expids: List of experiment IDs to delete.
+    :param force: Ask for confirmation if ``False``.
+    :returns: ``True`` if successful, ``False`` otherwise.
     :raises AutosubmitCritical: If the experiment does not exist or if there are insufficient permissions.
     """
+    # expid will come from argparse, which provides nix-style comma-separated values,
+    # so here we parse the comma-separated values. ``.fromkeys`` keeps order and removes
+    # duplicates.
+    expid_list = expids.replace(',', ' ').split(' ')
+    expid_list = [expid.lower() for expid in filter(lambda x: x, expid_list)]
+
+    failed: list[str] = []
+
+    for expid in expid_list:
+        try:
+            _delete_experiment(expid, force)
+        except Exception as e:
+            Log.error(f'Failed to delete experiment {expid}: {str(e)}')
+            failed.append(expid)
+
+    if failed:
+        Log.error(f"Deletion failed for experiments: {', '.join(failed)}")
+        return False
+
+    return True
+
+
+def _delete_experiment(expid: str, force: bool) -> None:
     if process_id(expid) is not None:
         raise AutosubmitCritical("Ensure no processes are running in the experiment directory", 7076)
 
@@ -121,7 +139,8 @@ def delete_experiment(expid: str, force: bool) -> bool:
     confirm_removal = force or user_yes_no_query(f"Do you want to delete {expid} ?")
 
     if not confirm_removal:
-        return False
+        Log.info(f'Experiment {expid} deletion cancelled by user')
+        return
 
     Log.info(f'Deleting experiment {expid}')
 
@@ -133,12 +152,13 @@ def delete_experiment(expid: str, force: bool) -> bool:
         raise
 
     try:
-        return _delete_expid(expid, force)
+        _delete_expid(expid, force)
+        Log.info(f'Experiment {expid} has been deleted')
     except Exception as e:
         raise AutosubmitCritical("Seems that something went wrong, please check the trace", 7012, str(e))
 
 
-def _delete_expid(expid_delete: str, force: bool = False) -> bool:
+def _delete_expid(expid_delete: str, force: bool = False) -> None:
     """Removes an experiment from the path and database.
     If the current user is eadmin and the -f flag has been sent, it deletes regardless of experiment owner.
 
@@ -173,7 +193,7 @@ def _delete_expid(expid_delete: str, force: bool = False) -> bool:
 
     if not experiment_path.exists():
         Log.printlog("Experiment directory does not exist.", Log.WARNING)
-        return False
+        return
 
     owner, eadmin, _ = check_ownership(expid_delete)
     if not (owner or (force and eadmin)):
@@ -209,61 +229,49 @@ def _delete_expid(expid_delete: str, force: bool = False) -> bool:
             6004, error_message
         )
 
-    return not bool(error_message)  # if there is a non-empty error, return False
-
 
 def _perform_deletion(experiment_path: Path, structure_db_path: Path, job_data_db_path: Path,
                       expid_delete: str) -> str:
     """Perform the deletion of an experiment, including its directory, structure database, and job data database.
 
     :param experiment_path: Path to the experiment directory.
-    :type experiment_path: Path
     :param structure_db_path: Path to the structure database file.
-    :type structure_db_path: Path
     :param job_data_db_path: Path to the job data database file.
-    :type job_data_db_path: Path
     :param expid_delete: Identifier of the experiment to delete.
-    :type expid_delete: str
     :return: An error message if any errors occurred during deletion, otherwise an empty string.
-    :rtype: str
     """
-    error_message = ""
+    error_message = []
 
     is_sqlite = BasicConfig.DATABASE_BACKEND == 'sqlite'
 
     Log.info(f"Deleting experiment from {BasicConfig.DATABASE_BACKEND} database...")
     try:
-        ret = db_common.delete_experiment(expid_delete)
-        if ret:
-            Log.result(f"Experiment {expid_delete} deleted")
+        db_common.delete_experiment(expid_delete)
+        Log.result(f"Experiment {expid_delete} deleted from database")
     except Exception as e:
-        error_message += f"Cannot delete experiment entry: {e}\n"
+        error_message.append(f"Cannot delete experiment entry: {e}")
 
     Log.info("Removing experiment directory...")
     try:
-        shutil.rmtree(experiment_path)
+        rmtree(experiment_path)
+        Log.result(f"Experiment directory {experiment_path} deleted from disk")
     except Exception as e:
-        error_message += f"Cannot delete directory: {e}\n"
+        error_message.append(f"Cannot delete directory: {e}")
 
     if is_sqlite:
-        Log.info("Removing Structure db...")
-        try:
-            os.remove(structure_db_path)
-        except Exception as e:
-            error_message += f"Cannot delete structure: {e}\n"
+        Log.info("Removing structure db...")
+
+        structure_db_path.unlink(missing_ok=True)
+        Log.info(f"Experiment {expid_delete} structure db deleted")
 
         Log.info("Removing job_data db...")
-        try:
-            db_path = job_data_db_path.with_suffix(".db")
-            sql_path = job_data_db_path.with_suffix(".sql")
-            if db_path.exists():
-                os.remove(db_path)
-            if sql_path.exists():
-                os.remove(sql_path)
-        except Exception as e:
-            error_message += f"Cannot delete job_data: {e}\n"
+        db_path = job_data_db_path.with_suffix(".db")
+        sql_path = job_data_db_path.with_suffix(".sql")
+        db_path.unlink(missing_ok=True)
+        sql_path.unlink(missing_ok=True)
+        Log.info(f"Experiment {expid_delete} job_data db deleted")
 
-    return error_message
+    return "\n".join(error_message)
 
 
 def copy_experiment(experiment_id, description, version, test=False, operational=False, evaluation=False):

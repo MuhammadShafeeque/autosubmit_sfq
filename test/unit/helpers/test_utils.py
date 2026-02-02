@@ -16,10 +16,11 @@
 # along with Autosubmit.  If not, see <http://www.gnu.org/licenses/>.
 
 from pathlib import Path
+from typing import Union
 
 import pytest
 
-from autosubmit.helpers.utils import strtobool, get_rc_path
+from autosubmit.helpers.utils import get_rc_path, strtobool, user_yes_no_query
 
 
 @pytest.mark.parametrize(
@@ -81,3 +82,28 @@ def test_get_rc_path(expected: Path, machine: bool, local: bool, env_vars: dict,
     mocker.patch.dict('autosubmit.helpers.utils.os.environ', env_vars, clear=True)
 
     assert expected == get_rc_path(machine, local)
+
+
+@pytest.mark.parametrize(
+    'answer,expected_or_error',
+    [
+        ('y', True),
+        ('n', False),
+        ('', Exception)
+    ]
+)
+def test_user_yes_no_query(answer: str, expected_or_error: Union[bool, Exception], mocker):
+    mocked_sys = mocker.patch('autosubmit.helpers.utils.sys')
+    if expected_or_error is ValueError:
+        mocker.patch('autosubmit.helpers.utils.input', return_value=[expected_or_error, 'y'])
+        answer = user_yes_no_query(answer)
+        assert mocked_sys.stdout.write.call_count == 2
+        assert 'Please respond with ' in mocked_sys.stdout.write.call_args_list[0][1][0]
+        assert answer
+    if expected_or_error is Exception:
+        mocker.patch('autosubmit.helpers.utils.input', return_value=expected_or_error)
+        with pytest.raises(expected_or_error):  # type: ignore
+            user_yes_no_query('Sure?')
+    else:
+        mocker.patch('autosubmit.helpers.utils.input', return_value=answer)
+        assert expected_or_error == user_yes_no_query('Sure?')

@@ -22,7 +22,7 @@ import sys
 from contextlib import suppress
 from itertools import zip_longest
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Iterable, Optional, Union, TYPE_CHECKING
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.log.log import AutosubmitCritical, Log
@@ -52,6 +52,7 @@ def check_jobs_file_exists(as_conf: 'AutosubmitConfig', current_section_name: Op
             raise AutosubmitCritical(f"Templates directory {templates_dir} is not a directory", 7011)
 
         # Check if all files in jobs_data exist or only current section
+        jobs_data: Iterable
         if current_section_name:
             jobs_data = [as_conf.jobs_data.get(current_section_name, {})]
         else:
@@ -74,7 +75,7 @@ def check_jobs_file_exists(as_conf: 'AutosubmitConfig', current_section_name: Op
 
 
 def check_experiment_ownership(
-        expid: str, basic_config: BasicConfig, raise_error=False, logger: Log = None
+        expid: str, basic_config: BasicConfig, raise_error=False, logger: Optional[Log] = None
 ) -> tuple[bool, bool, str]:
     # [A-Za-z09]+ variable is not needed, LOG is global thus it will be read if available
     my_user_id = os.getuid()
@@ -303,6 +304,7 @@ def get_rc_path(machine: bool, local: bool) -> Path:
     if 'AUTOSUBMIT_CONFIGURATION' in os.environ:
         return Path(os.environ['AUTOSUBMIT_CONFIGURATION'])
 
+    rc_path: Union[str, Path]
     if machine:
         rc_path = '/etc'
     elif local:
@@ -324,7 +326,7 @@ def user_yes_no_query(question: str) -> bool:
         try:
             answer = input()
             return strtobool(answer.lower())
-        except EOFError as e:
-            raise AutosubmitCritical("No input detected, the experiment will not be erased.", 7011, str(e))
         except ValueError:
             sys.stdout.write('Please respond with \'y\' or \'n\'.\n')
+        except Exception as e:
+            raise AutosubmitCritical("No input detected, the experiment will not be erased.", 7011, str(e))
