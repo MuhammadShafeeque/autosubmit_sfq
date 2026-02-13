@@ -27,3 +27,11 @@ dockerfiles/id_rsa*
 dockerfiles/authorized_keys
 
 venv/
+
+# AI/LLM
+.github/agents
+.github/skills
+.github/chats
+.github/plans
+.github/workflows/agents.yml
+.github/workflows/skills.yml 
