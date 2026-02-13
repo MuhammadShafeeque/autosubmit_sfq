@@ -347,6 +347,67 @@ def create_rocrate_archive(
         lang_version=as_version,
         gen_cwl=False
     )
+
+    # Add configuration provenance if available
+    if as_conf.provenance_tracker and as_conf.track_provenance:
+        provenance_data = as_conf.get_all_provenance()
+        if provenance_data:
+            # Create provenance metadata file
+            provenance_json_path = experiment_path / "conf/metadata/provenance_metadata.json"
+            provenance_json_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                with open(provenance_json_path, 'w') as f:
+                    json.dump(provenance_data, f, indent=2)
+                
+                # Add provenance file to crate
+                provenance_file = crate.add_file(
+                    source=provenance_json_path,
+                    dest_path="conf/metadata/provenance_metadata.json",
+                    properties={
+                        "@type": "File",
+                        "name": "Configuration Provenance Metadata",
+                        "description": "Parameter-level source tracking for configuration files",
+                        "encodingFormat": "application/json",
+                        "about": {"@id": str(unified_yaml_configuration)}
+                    }
+                )
+                
+                # Link provenance to main workflow entity
+                if main_entity:
+                    main_entity_props = main_entity.properties()
+                    if 'about' not in main_entity_props:
+                        main_entity_props['about'] = []
+                    elif not isinstance(main_entity_props['about'], list):
+                        main_entity_props['about'] = [main_entity_props['about']]
+                    
+                    main_entity_props['about'].append({"@id": provenance_file.id})
+                
+                Log.info(f"Added configuration provenance metadata to RO-Crate ({len(as_conf.provenance_tracker)} parameters tracked)")
+                
+                # Annotate configuration files with provenance info
+                conf_files = list(Path(experiment_path / "conf").rglob("*.yml")) + \
+                             list(Path(experiment_path / "conf").rglob("*.yaml"))
+                
+                for conf_file in conf_files:
+                    # Count parameters from this file
+                    file_path_str = str(conf_file.resolve())
+                    param_count = sum(1 for param_path, prov_entry in as_conf.provenance_tracker.provenance_map.items()
+                                     if prov_entry.file == file_path_str)
+                    
+                    if param_count > 0:
+                        try:
+                            # Find the file entity in crate and add metadata
+                            relative_path = conf_file.relative_to(experiment_path)
+                            file_entity = crate.dereference(str(relative_path))
+                            
+                            if file_entity:
+                                file_props = file_entity.properties()
+                                file_props['comment'] = f"Defines {param_count} configuration parameter(s)"
+                        except (ValueError, KeyError):
+                            pass  # File not in crate or path issues
+            except (OSError, IOError) as e:
+                Log.warning(f"Failed to create provenance metadata file: {e}")
     crate.metadata.properties().update({
         'conformsTo': rocrate_metadata_json_profiles
     })

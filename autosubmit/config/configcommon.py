@@ -37,6 +37,7 @@ from pyparsing import nestedExpr
 from ruamel.yaml import YAML
 
 from autosubmit.config.basicconfig import BasicConfig
+from autosubmit.config.provenance_tracker import ProvenanceTracker
 from autosubmit.config.yamlparser import YAMLParserFactory
 from autosubmit.log.log import Log, AutosubmitCritical, AutosubmitError
 
@@ -63,6 +64,8 @@ class AutosubmitConfig(object):
         self.data_loops = set()
 
         self.current_loaded_files: dict = {}
+        self.provenance_tracker: Optional[ProvenanceTracker] = None
+        self.track_provenance: bool = False  # Will be set based on CONFIG.TRACK_PROVENANCE
         self.conf_folder_yaml = Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf")
         if not Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf").exists():
             raise IOError(f"Experiment {expid}/conf does not exist")
@@ -722,6 +725,32 @@ class AutosubmitConfig(object):
                     self.convert_list_to_string(data[key])
         return data
 
+    def _track_yaml_provenance(self, data: dict, file_path: str, prefix: str = ""):
+        """Track provenance for parameters loaded from YAML file.
+        
+        Args:
+            data: Dictionary loaded from YAML
+            file_path: Path to the YAML file
+            prefix: Dot-separated path prefix for nested keys
+        """
+        if not self.track_provenance or not self.provenance_tracker:
+            return
+        
+        for key, value in data.items():
+            param_path = f"{prefix}.{key}" if prefix else key
+            
+            if isinstance(value, dict):
+                # Recursively track nested parameters
+                self._track_yaml_provenance(value, file_path, param_path)
+            else:
+                # Track this parameter
+                self.provenance_tracker.track(
+                    param_path=param_path,
+                    file=file_path,
+                    line=None,  # TODO: Line numbers when parser supports it
+                    col=None
+                )
+
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
         :param current_folder_data: current folder data
@@ -743,6 +772,10 @@ class AutosubmitConfig(object):
             self.misc_files.append(yaml_file)
             new_file.data = {}
         self._delete_autosubmit_calculated_variables(new_file.data)
+        
+        # Track provenance for loaded parameters
+        self._track_yaml_provenance(new_file.data, str(Path(yaml_file).resolve()))
+        
         return self.unify_conf(current_folder_data, new_file.data)
 
     # noinspection PyMethodMayBeStatic
@@ -1824,6 +1857,9 @@ class AutosubmitConfig(object):
         # Reload only the files that have been modified.
         # Only reload the data if there are changes or there is no data loaded yet.
         if force_load or self.needs_reload():
+            # Initialize provenance tracker if enabled
+            if self.track_provenance:
+                self.provenance_tracker = ProvenanceTracker()
             # Load all the files starting from the $expid/conf folder
             starter_conf = {}
             self.current_loaded_files = {}  # reset loaded files
@@ -1866,6 +1902,16 @@ class AutosubmitConfig(object):
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
             self._add_autosubmit_dict()
+            
+            # Enable provenance tracking if configured
+            if "CONFIG" in self.experiment_data:
+                track_prov = self.experiment_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False)
+                if track_prov and not self.track_provenance:
+                    self.track_provenance = True
+                    self.provenance_tracker = ProvenanceTracker()
+                    # Re-track all configuration (reload config files)
+                    Log.get_logger("Autosubmit").info("Provenance tracking enabled - reloading configuration")
+            
             self.misc_data = {}
             self.misc_files = list(set(self.misc_files))
             for filename in self.misc_files:
@@ -1936,6 +1982,66 @@ class AutosubmitConfig(object):
 
         self.substitute_dynamic_variables(target)
 
+    def get_parameter_source(self, param_path: str) -> Optional[dict]:
+        """Get the source information for a specific parameter.
+        
+        Args:
+            param_path: Dot-separated parameter path (e.g., "DEFAULT.EXPID")
+            
+        Returns:
+            Dictionary with keys: file, line, col, timestamp. None if not tracked.
+            
+        Example:
+            >>> config.get_parameter_source("DEFAULT.EXPID")
+            {'file': '/path/to/minimal.yml', 'line': None, 'col': None, 'timestamp': 1234567890.0}
+        """
+        if not self.provenance_tracker:
+            return None
+        
+        prov_entry = self.provenance_tracker.get(param_path)
+        if prov_entry:
+            return prov_entry.to_dict()
+        return None
+
+    def get_all_provenance(self) -> dict:
+        """Get all provenance data as a nested dictionary.
+        
+        Returns:
+            Nested dictionary mirroring configuration structure with provenance info.
+            
+        Example:
+            >>> config.get_all_provenance()
+            {
+                'DEFAULT': {
+                    'EXPID': {'file': '/path/minimal.yml', 'line': None, ...}
+                }
+            }
+        """
+        if not self.provenance_tracker:
+            return {}
+        
+        return self.provenance_tracker.export_to_dict()
+
+    def export_provenance(self, filepath: str) -> None:
+        """Export provenance data to a JSON file.
+        
+        Args:
+            filepath: Path where to save the provenance JSON
+            
+        Example:
+            >>> config.export_provenance("/path/to/provenance.json")
+        """
+        if not self.provenance_tracker:
+            Log.get_logger("Autosubmit").warning("No provenance data to export")
+            return
+        
+        prov_data = self.provenance_tracker.export_to_dict()
+        
+        with open(filepath, 'w') as f:
+            json.dump(prov_data, f, indent=2)
+        
+        Log.get_logger("Autosubmit").info(f"Provenance data exported to {filepath}")
+
     def save(self) -> None:
         """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file."""
         if self.is_current_logged_user_owner:
@@ -1948,6 +2054,15 @@ class AutosubmitConfig(object):
                             self.metadata_folder.joinpath("experiment_data.yml.bak"))
 
             try:
+                # Export provenance section if tracking is enabled
+                if self.track_provenance and self.provenance_tracker:
+                    provenance_data = self.provenance_tracker.export_to_dict()
+                    if provenance_data:
+                        self.experiment_data["PROVENANCE"] = provenance_data
+                        Log.get_logger("Autosubmit").debug(
+                            f"Added PROVENANCE section with {len(self.provenance_tracker)} parameters"
+                        )
+                
                 with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
                     # Not using typ="safe" to preserve the readability of the file
                     YAML().dump(self.experiment_data, stream)
