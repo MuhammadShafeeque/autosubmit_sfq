@@ -35,6 +35,7 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.provenance_tracker import ProvenanceTracker
@@ -1857,6 +1858,19 @@ class AutosubmitConfig(object):
         # Reload only the files that have been modified.
         # Only reload the data if there are changes or there is no data loaded yet.
         if force_load or self.needs_reload():
+            # Early check for TRACK_PROVENANCE before loading config files
+            if not self.track_provenance:
+                # Quick pre-scan to check if provenance tracking should be enabled
+                for filename in self.get_yaml_filenames_to_load(self.conf_folder_yaml):
+                    try:
+                        temp_data = AutosubmitConfig.get_parser(self.parser_factory, filename).data
+                        if temp_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False):
+                            self.track_provenance = True
+                            Log.info("Provenance tracking enabled")
+                            break
+                    except:
+                        pass  # If file fails to load, continue checking others
+            
             # Initialize provenance tracker if enabled
             if self.track_provenance:
                 self.provenance_tracker = ProvenanceTracker()
@@ -1902,15 +1916,6 @@ class AutosubmitConfig(object):
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
             self._add_autosubmit_dict()
-            
-            # Enable provenance tracking if configured
-            if "CONFIG" in self.experiment_data:
-                track_prov = self.experiment_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False)
-                if track_prov and not self.track_provenance:
-                    self.track_provenance = True
-                    self.provenance_tracker = ProvenanceTracker()
-                    # Re-track all configuration (reload config files)
-                    Log.info("Provenance tracking enabled - reloading configuration")
             
             self.misc_data = {}
             self.misc_files = list(set(self.misc_files))
@@ -2042,6 +2047,54 @@ class AutosubmitConfig(object):
         
         Log.info(f"Provenance data exported to {filepath}")
 
+    def _add_provenance_comments(self, data: dict, prefix: str = "") -> CommentedMap:
+        """Add inline provenance comments to configuration data.
+        
+        Recursively walks through the configuration dictionary and adds
+        end-of-line comments showing the source file for each parameter.
+        
+        Args:
+            data: Dictionary to annotate with comments
+            prefix: Dot-separated path prefix for nested keys
+            
+        Returns:
+            CommentedMap with provenance comments attached
+            
+        Example:
+            Output in YAML:
+            DEFAULT:
+              EXPID: a000  # Source: /path/to/minimal.yml
+              HPCARCH: nord3v2  # Source: /path/to/main.yml
+        """
+        commented_data = CommentedMap(data)
+        
+        if not self.track_provenance or not self.provenance_tracker:
+            return commented_data
+        
+        for key, value in data.items():
+            param_path = f"{prefix}.{key}" if prefix else key
+            
+            # Get provenance for this parameter
+            prov_entry = self.provenance_tracker.get(param_path)
+            
+            if isinstance(value, dict):
+                # Recursively process nested dictionaries
+                commented_data[key] = self._add_provenance_comments(value, param_path)
+                # Add comment for the section itself if it has provenance
+                if prov_entry:
+                    source = prov_entry.file
+                    if prov_entry.line:
+                        source = f"{source}:{prov_entry.line}"
+                    commented_data.yaml_add_eol_comment(f"From: {source}", key)
+            elif prov_entry:
+                # Add end-of-line comment for leaf values
+                source = prov_entry.file
+                if prov_entry.line:
+                    source = f"{source}:{prov_entry.line}"
+                commented_data.yaml_add_eol_comment(f"Source: {source}", key)
+        
+        return commented_data
+
     def save(self) -> None:
         """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file."""
         if self.is_current_logged_user_owner:
@@ -2054,18 +2107,17 @@ class AutosubmitConfig(object):
                             self.metadata_folder.joinpath("experiment_data.yml.bak"))
 
             try:
-                # Export provenance section if tracking is enabled
+                # Add provenance as inline comments if tracking is enabled
+                data_to_save = self.experiment_data
                 if self.track_provenance and self.provenance_tracker:
-                    provenance_data = self.provenance_tracker.export_to_dict()
-                    if provenance_data:
-                        self.experiment_data["PROVENANCE"] = provenance_data
-                        Log.debug(
-                            f"Added PROVENANCE section with {len(self.provenance_tracker)} parameters"
-                        )
+                    data_to_save = self._add_provenance_comments(self.experiment_data)
+                    Log.debug(f"Added provenance comments for {len(self.provenance_tracker)} parameters")
                 
                 with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
                     # Not using typ="safe" to preserve the readability of the file
-                    YAML().dump(self.experiment_data, stream)
+                    yaml = YAML()
+                    yaml.default_flow_style = False
+                    yaml.dump(data_to_save, stream)
                 self.metadata_folder.joinpath("experiment_data.yml").chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
