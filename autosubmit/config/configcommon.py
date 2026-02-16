@@ -1858,22 +1858,16 @@ class AutosubmitConfig(object):
         # Reload only the files that have been modified.
         # Only reload the data if there are changes or there is no data loaded yet.
         if force_load or self.needs_reload():
-            # Early check for TRACK_PROVENANCE before loading config files
+            # Always create tracker initially - we'll verify TRACK_PROVENANCE after loading ALL configs
+            # (including custom configs which may contain the setting)
             if not self.track_provenance:
-                # Quick pre-scan to check if provenance tracking should be enabled
-                for filename in self.get_yaml_filenames_to_load(self.conf_folder_yaml):
-                    try:
-                        temp_data = AutosubmitConfig.get_parser(self.parser_factory, filename).data
-                        if temp_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False):
-                            self.track_provenance = True
-                            Log.info("Provenance tracking enabled")
-                            break
-                    except:
-                        pass  # If file fails to load, continue checking others
-            
-            # Initialize provenance tracker if enabled
-            if self.track_provenance:
                 self.provenance_tracker = ProvenanceTracker()
+                self.track_provenance = True  # Enable tracking during config load
+                self._provenance_deferred_check = True  # Flag to verify after all configs loaded
+            else:
+                self.provenance_tracker = ProvenanceTracker()
+                self._provenance_deferred_check = False
+            
             # Load all the files starting from the $expid/conf folder
             starter_conf = {}
             self.current_loaded_files = {}  # reset loaded files
@@ -1912,6 +1906,18 @@ class AutosubmitConfig(object):
                 BasicConfig.LOCAL_ROOT_DIR, self.expid)
             self.experiment_data['PROJDIR'] = self.get_project_dir()
             self.experiment_data.update(BasicConfig().props())
+            
+            # Deferred check for TRACK_PROVENANCE after ALL configs loaded (including custom configs)
+            if hasattr(self, '_provenance_deferred_check') and self._provenance_deferred_check:
+                if self.experiment_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False):
+                    self.track_provenance = True
+                    Log.info("Provenance tracking enabled (found in configuration)")
+                else:
+                    # Tracking not enabled, discard the tracker
+                    self.provenance_tracker = None
+                    self.track_provenance = False
+                delattr(self, '_provenance_deferred_check')
+            
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
