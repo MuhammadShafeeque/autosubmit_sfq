@@ -810,6 +810,51 @@ class AutosubmitConfig(object):
         )
         Log.debug(f"[PROV-COMPUTED] Tracked: {param_path} -> {source_description}")
 
+    def _track_dict_keys_only(self, data: dict, file_path: str, prefix: str = ""):
+        """Track all keys in a dict structure, even without line/col positions.
+        
+        This is used for tracking merged configs where original line/col metadata
+        has been lost during normalization and merging. At least we preserve which
+        file each parameter came from.
+        
+        Args:
+            data: Dictionary to track
+            file_path: Path to the YAML file these keys came from
+            prefix: Dot-separated path prefix for nested keys
+        """
+        if not self.track_provenance or self.provenance_tracker is None:
+            return
+        
+        if not prefix:
+            Log.info(f"[PROV-MERGED] Tracking merged config keys from {Path(file_path).name}")
+        
+        params_tracked = 0
+        for key, value in data.items():
+            param_path = f"{prefix}.{key}" if prefix else key
+            
+            # Only track if not already tracked (don't overwrite good line/col with None!)
+            existing = self.provenance_tracker.get(param_path)
+            if existing is None:
+                # Not tracked yet - track with None positions (better than nothing)
+                self.provenance_tracker.track(
+                    param_path=param_path,
+                    file=file_path,
+                    line=None,
+                    col=None
+                )
+                params_tracked += 1
+                Log.debug(f"[PROV-MERGED] Tracked: {param_path} -> {file_path} (merged, no position)")
+            else:
+                # Already tracked - skip to preserve original line/col
+                Log.debug(f"[PROV-MERGED] Skipped: {param_path} (already tracked from {existing.file})")
+            
+            # Recursively track nested dicts
+            if isinstance(value, dict):
+                self._track_dict_keys_only(value, file_path, param_path)
+        
+        if not prefix:
+            Log.info(f"[PROV-MERGED] ✓ Tracked {params_tracked} merged parameters from {Path(file_path).name}")
+
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
         :param current_folder_data: current folder data
@@ -839,7 +884,17 @@ class AutosubmitConfig(object):
             new_file.data = {}
         self._delete_autosubmit_calculated_variables(new_file.data)
         
-        return self.unify_conf(current_folder_data, new_file.data)
+        # Merge with current data
+        unified_result = self.unify_conf(current_folder_data, new_file.data)
+        
+        # Track the MERGED result - even without line/col, we track which file it came from
+        # This fixes the problem where deep_update() creates new dicts that lose provenance
+        if self.track_provenance and self.provenance_tracker is not None:
+            Log.info(f"[PROV-LOAD] Tracking merged result from {yaml_file}")
+            self._track_dict_keys_only(unified_result, str(Path(yaml_file).resolve()))
+            Log.info(f"[PROV-LOAD] Finished tracking merged result")
+        
+        return unified_result
 
     # noinspection PyMethodMayBeStatic
     def get_yaml_filenames_to_load(self, yaml_folder, ignore_minimal=False):
