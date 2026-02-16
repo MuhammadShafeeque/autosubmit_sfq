@@ -822,6 +822,13 @@ class AutosubmitConfig(object):
         # load yaml file with ruamel.yaml
 
         new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file)
+        
+        # Track BEFORE normalization (while .lc metadata still exists)
+        if self.track_provenance and self.provenance_tracker is not None:
+            Log.info(f"[PROV-LOAD] Tracking provenance BEFORE normalization for {yaml_file}")
+            self._track_yaml_provenance(new_file.data, str(Path(yaml_file).resolve()))
+            Log.info(f"[PROV-LOAD] Finished tracking provenance for {yaml_file}")
+        
         new_file.data = self.normalize_variables(new_file.data.copy(),
                                                  must_exists=False)  # TODO Figure out why this .copy is needed
         if new_file.data.get("DEFAULT", {}).get("CUSTOM_CONFIG", None) is not None:
@@ -831,11 +838,6 @@ class AutosubmitConfig(object):
             self.misc_files.append(yaml_file)
             new_file.data = {}
         self._delete_autosubmit_calculated_variables(new_file.data)
-        
-        # Track provenance for loaded parameters
-        Log.info(f"[PROV-LOAD] About to track provenance for {yaml_file}")
-        self._track_yaml_provenance(new_file.data, str(Path(yaml_file).resolve()))
-        Log.info(f"[PROV-LOAD] Finished tracking provenance for {yaml_file}")
         
         return self.unify_conf(current_folder_data, new_file.data)
 
@@ -2239,9 +2241,9 @@ class AutosubmitConfig(object):
                 if prov_entry:
                     source = prov_entry.file
                     if prov_entry.line:
-                        source = f"{source}:{prov_entry.line}"
+                        source = f"{source} line:{prov_entry.line}"
                         if prov_entry.col:
-                            source = f"{source}:{prov_entry.col}"
+                            source = f"{source},col:{prov_entry.col}"
                     source = f"{source} [{param_path}]"
                     commented_data.yaml_add_eol_comment(f"From: {source}", key)
                     comments_added += 1
@@ -2253,9 +2255,9 @@ class AutosubmitConfig(object):
                 if prov_entry:
                     source = prov_entry.file
                     if prov_entry.line:
-                        source = f"{source}:{prov_entry.line}"
+                        source = f"{source} line:{prov_entry.line}"
                         if prov_entry.col:
-                            source = f"{source}:{prov_entry.col}"
+                            source = f"{source},col:{prov_entry.col}"
                     source = f"{source} [{param_path}]"
                     commented_data.yaml_add_eol_comment(f"Source: {source}", key)
                     comments_added += 1
