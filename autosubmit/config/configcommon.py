@@ -1926,6 +1926,9 @@ class AutosubmitConfig(object):
             if hasattr(self, '_provenance_deferred_check') and self._provenance_deferred_check:
                 if self.experiment_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False):
                     self.track_provenance = True
+                    # Ensure tracker exists when tracking is enabled
+                    if not self.provenance_tracker:
+                        self.provenance_tracker = ProvenanceTracker()
                     Log.info("Provenance tracking enabled (found in configuration)")
                 else:
                     # Only disable if we haven't confirmed tracking before
