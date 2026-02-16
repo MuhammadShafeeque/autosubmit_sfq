@@ -67,7 +67,7 @@ class AutosubmitConfig(object):
         self.current_loaded_files: dict = {}
         self.provenance_tracker: ProvenanceTracker = ProvenanceTracker()
         self.track_provenance: bool = True
-        Log.debug(f"[PROV-DEBUG] __init__() tracker created - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}")
+        Log.info(f"[PROV-DEBUG] __init__() tracker created - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}")
         self.conf_folder_yaml = Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf")
         if not Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf").exists():
             raise IOError(f"Experiment {expid}/conf does not exist")
@@ -1869,11 +1869,11 @@ class AutosubmitConfig(object):
         # Only reload the data if there are changes or there is no data loaded yet.
         if force_load or self.needs_reload():
             # Log point 1: Start of reload()
-            Log.debug(f"[PROV-DEBUG] reload() called - force_load={force_load}, only_experiment_data={only_experiment_data}, track_provenance={self.track_provenance}")
+            Log.info(f"[PROV-DEBUG] reload() called - force_load={force_load}, only_experiment_data={only_experiment_data}, track_provenance={self.track_provenance}")
             # Ensure provenance tracker always exists
             if not hasattr(self, 'provenance_tracker') or self.provenance_tracker is None:
                 self.provenance_tracker = ProvenanceTracker()
-                Log.debug(f"[PROV-DEBUG] Initialized ProvenanceTracker")
+                Log.info(f"[PROV-DEBUG] Initialized ProvenanceTracker")
             
             # Load all the files starting from the $expid/conf folder
             starter_conf = {}
@@ -1915,8 +1915,8 @@ class AutosubmitConfig(object):
             self.experiment_data.update(BasicConfig().props())
             
             # Provenance tracking is always enabled - no deferred checks needed
-            Log.debug(f"[PROV-DEBUG] Provenance tracking is always enabled")
-            Log.debug(f"[PROV-DEBUG] End of reload() - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}, num_tracked={len(self.provenance_tracker.provenance_map) if self.provenance_tracker else 0}")
+            Log.info(f"[PROV-DEBUG] Provenance tracking is always enabled")
+            Log.info(f"[PROV-DEBUG] End of reload() - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}, num_tracked={len(self.provenance_tracker.provenance_map) if self.provenance_tracker else 0}")
             
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
@@ -2131,7 +2131,7 @@ class AutosubmitConfig(object):
                 # Add provenance as inline comments if tracking is enabled
                 data_to_save = self.experiment_data
                 # Log point 9: In save() method before provenance check
-                Log.debug(f"[PROV-DEBUG] save() called - track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None if hasattr(self, 'provenance_tracker') else 'no_attr'}")
+                Log.info(f"[PROV-DEBUG] save() called - track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None if hasattr(self, 'provenance_tracker') else 'no_attr'}")
                 if self.track_provenance and self.provenance_tracker:
                     num_tracked = len(self.provenance_tracker.provenance_map)
                     Log.info(f"Adding provenance comments for {num_tracked} tracked parameters")
