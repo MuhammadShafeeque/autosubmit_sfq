@@ -67,6 +67,7 @@ class AutosubmitConfig(object):
         self.current_loaded_files: dict = {}
         self.provenance_tracker: ProvenanceTracker = ProvenanceTracker()
         self.track_provenance: bool = True
+        Log.debug(f"[PROV-DEBUG] __init__() tracker created - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}")
         self.conf_folder_yaml = Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf")
         if not Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf").exists():
             raise IOError(f"Experiment {expid}/conf does not exist")
@@ -1915,6 +1916,7 @@ class AutosubmitConfig(object):
             
             # Provenance tracking is always enabled - no deferred checks needed
             Log.debug(f"[PROV-DEBUG] Provenance tracking is always enabled")
+            Log.debug(f"[PROV-DEBUG] End of reload() - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}, num_tracked={len(self.provenance_tracker.provenance_map) if self.provenance_tracker else 0}")
             
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)

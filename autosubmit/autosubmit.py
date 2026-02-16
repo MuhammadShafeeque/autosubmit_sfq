@@ -4546,6 +4546,8 @@ class Autosubmit:
                     Log.info("\nSaving the jobs list...")
                     job_list.clear_generate()
                     job_list.save()
+                    # DEBUG: Check tracker state before save
+                    Log.info(f"[PROV-DEBUG-CREATE] Before as_conf.save(): track_provenance={as_conf.track_provenance}, tracker_is_none={as_conf.provenance_tracker is None if hasattr(as_conf, 'provenance_tracker') else 'NO_ATTR'}, tracker_type={type(as_conf.provenance_tracker) if hasattr(as_conf, 'provenance_tracker') and as_conf.provenance_tracker is not None else 'N/A'}")
                     as_conf.save()
                     try:
                         packages_persistence = JobPackagePersistence(expid)
