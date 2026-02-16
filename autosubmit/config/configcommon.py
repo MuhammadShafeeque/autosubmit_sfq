@@ -737,6 +737,7 @@ class AutosubmitConfig(object):
         if not self.track_provenance or not self.provenance_tracker:
             return
         
+        params_tracked = 0
         for key, value in data.items():
             param_path = f"{prefix}.{key}" if prefix else key
             
@@ -751,6 +752,11 @@ class AutosubmitConfig(object):
                     line=None,  # TODO: Line numbers when parser supports it
                     col=None
                 )
+                params_tracked += 1
+        
+        # Log tracking progress (only for top-level calls)
+        if not prefix and params_tracked > 0:
+            Log.info(f"Tracked {params_tracked} parameters from {file_path}")
 
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
@@ -2116,8 +2122,19 @@ class AutosubmitConfig(object):
                 # Add provenance as inline comments if tracking is enabled
                 data_to_save = self.experiment_data
                 if self.track_provenance and self.provenance_tracker:
+                    num_tracked = len(self.provenance_tracker.provenance_map)
+                    Log.info(f"Adding provenance comments for {num_tracked} tracked parameters")
+                    if num_tracked > 0:
+                        # Show first few tracked parameters as examples
+                        examples = list(self.provenance_tracker.provenance_map.keys())[:3]
+                        Log.info(f"Example tracked parameters: {', '.join(examples)}")
                     data_to_save = self._add_provenance_comments(self.experiment_data)
-                    Log.debug(f"Added provenance comments for {len(self.provenance_tracker)} parameters")
+                    Log.info(f"Provenance comments added to YAML output")
+                else:
+                    if not self.track_provenance:
+                        Log.info("Provenance tracking is disabled, skipping comments")
+                    elif not self.provenance_tracker:
+                        Log.info("Provenance tracker is None, skipping comments")
                 
                 with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
                     # Not using typ="safe" to preserve the readability of the file
