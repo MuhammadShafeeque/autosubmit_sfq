@@ -2132,7 +2132,7 @@ class AutosubmitConfig(object):
                 data_to_save = self.experiment_data
                 # Log point 9: In save() method before provenance check
                 Log.info(f"[PROV-DEBUG] save() called - track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None if hasattr(self, 'provenance_tracker') else 'no_attr'}")
-                if self.track_provenance and self.provenance_tracker:
+                if self.track_provenance and self.provenance_tracker is not None:
                     num_tracked = len(self.provenance_tracker.provenance_map)
                     Log.info(f"Adding provenance comments for {num_tracked} tracked parameters")
                     if num_tracked > 0:
