@@ -67,6 +67,7 @@ class AutosubmitConfig(object):
         self.current_loaded_files: dict = {}
         self.provenance_tracker: ProvenanceTracker = ProvenanceTracker()
         self.track_provenance: bool = True
+        print(f"\n[PROVENANCE-INIT] Tracker created in __init__() for expid={expid}", flush=True)
         Log.info(f"[PROV-DEBUG] __init__() tracker created - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}")
         self.conf_folder_yaml = Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf")
         if not Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf").exists():
@@ -737,6 +738,7 @@ class AutosubmitConfig(object):
         """
         # Log entry for top-level calls only
         if not prefix:
+            print(f"[PROVENANCE-TRACK] Tracking {len(data)} keys from {Path(file_path).name}", flush=True)
             Log.info(f"[PROV-TRACK] _track_yaml_provenance called for {file_path}")
             Log.info(f"[PROV-TRACK] track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None}, data_keys={len(data)}")
         
@@ -767,6 +769,7 @@ class AutosubmitConfig(object):
         
         # Log tracking progress (only for top-level calls)
         if not prefix:
+            print(f"[PROVENANCE-TRACK] ✓ Tracked {params_tracked} parameters, tracker size now: {len(self.provenance_tracker.provenance_map)}", flush=True)
             Log.info(f"[PROV-TRACK] ✓ Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters")
             Log.info(f"[PROV-TRACK] Current tracker size: {len(self.provenance_tracker.provenance_map)} total parameters tracked")
 
@@ -2141,6 +2144,8 @@ class AutosubmitConfig(object):
                 # Add provenance as inline comments if tracking is enabled
                 data_to_save = self.experiment_data
                 # Log point 9: In save() method before provenance check
+                tracker_size = len(self.provenance_tracker.provenance_map) if hasattr(self, 'provenance_tracker') and self.provenance_tracker else 0
+                print(f"\n[PROVENANCE-SAVE] save() called, tracker has {tracker_size} parameters\n", flush=True)
                 Log.info(f"[PROV-DEBUG] save() called - track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None if hasattr(self, 'provenance_tracker') else 'no_attr'}")
                 if self.track_provenance and self.provenance_tracker is not None:
                     num_tracked = len(self.provenance_tracker.provenance_map)
