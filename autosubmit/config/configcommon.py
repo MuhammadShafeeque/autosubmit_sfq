@@ -753,15 +753,33 @@ class AutosubmitConfig(object):
             total_keys += 1
             param_path = f"{prefix}.{key}" if prefix else key
             
-            # Track this parameter (both dict sections and leaf values)
+            # Extract line and column numbers from ruamel.yaml's position info
+            line, col = None, None
+            if hasattr(data, 'lc') and hasattr(data.lc, 'key'):
+                try:
+                    line_col_tuple = data.lc.key(key)
+                    if line_col_tuple and len(line_col_tuple) >= 2:
+                        # ruamel.yaml uses 0-based indexing, convert to 1-based
+                        line = line_col_tuple[0] + 1 if line_col_tuple[0] is not None else None
+                        col = line_col_tuple[1] + 1 if line_col_tuple[1] is not None else None
+                except (AttributeError, KeyError, TypeError):
+                    # If extraction fails, keep None values
+                    pass
+            
+            # Track this parameter with position info
             self.provenance_tracker.track(
                 param_path=param_path,
                 file=file_path,
-                line=None,  # TODO: Line numbers when parser supports it
-                col=None
+                line=line,
+                col=col
             )
             params_tracked += 1
-            Log.debug(f"[PROV] Tracked: {param_path} -> {file_path}")
+            
+            # Log with position info if available
+            if line is not None:
+                Log.debug(f"[PROV] Tracked: {param_path} -> {file_path}:{line}:{col if col else '?'}")
+            else:
+                Log.debug(f"[PROV] Tracked: {param_path} -> {file_path} (no position)")
             
             if isinstance(value, dict):
                 # Recursively track nested parameters
@@ -772,6 +790,25 @@ class AutosubmitConfig(object):
             print(f"[PROVENANCE-TRACK] ✓ Tracked {params_tracked} parameters, tracker size now: {len(self.provenance_tracker.provenance_map)}", flush=True)
             Log.info(f"[PROV-TRACK] ✓ Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters")
             Log.info(f"[PROV-TRACK] Current tracker size: {len(self.provenance_tracker.provenance_map)} total parameters tracked")
+
+    def _track_computed_parameter(self, param_path: str, value: Any, source_description: str):
+        """Track computed/system parameters with descriptive sources.
+        
+        Args:
+            param_path: Dot-separated parameter path (e.g., "HPCTYPE" or "AUTOSUBMIT.WORKFLOW_COMMIT")
+            value: Parameter value
+            source_description: Descriptive source (e.g., "computed:PLATFORMS.LOCAL.TYPE", "environment:$USER")
+        """
+        if not self.track_provenance or self.provenance_tracker is None:
+            return
+        
+        self.provenance_tracker.track(
+            param_path=param_path,
+            file=source_description,  # Use source description as "file"
+            line=None,
+            col=None
+        )
+        Log.debug(f"[PROV-COMPUTED] Tracked: {param_path} -> {source_description}")
 
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
@@ -1894,6 +1931,11 @@ class AutosubmitConfig(object):
             for filename in self.get_yaml_filenames_to_load(self.conf_folder_yaml):
                 starter_conf = self.unify_conf(starter_conf, self.load_config_file(starter_conf, Path(filename)))
             starter_conf = self.load_as_env_variables(starter_conf)
+            # Track environment variable provenance
+            for key in starter_conf.keys():
+                if key.startswith("AS_ENV_"):
+                    env_name = key.replace("AS_ENV_", "")
+                    self._track_computed_parameter(key, starter_conf[key], f"environment:${env_name}")
             starter_conf = self.load_common_parameters(starter_conf)
             self.starter_conf = starter_conf
             # Same data without the minimal config ( if any ), need to be here due to current_loaded_files variable
@@ -1924,8 +1966,48 @@ class AutosubmitConfig(object):
             self.deep_add_missing_starter_conf(self.experiment_data, starter_conf)
             self.experiment_data['ROOTDIR'] = os.path.join(
                 BasicConfig.LOCAL_ROOT_DIR, self.expid)
+            self._track_computed_parameter("ROOTDIR", self.experiment_data['ROOTDIR'], "computed:LOCAL_ROOT_DIR/EXPID")
+            
             self.experiment_data['PROJDIR'] = self.get_project_dir()
-            self.experiment_data.update(BasicConfig().props())
+            self._track_computed_parameter("PROJDIR", self.experiment_data['PROJDIR'], "computed:PROJECT_DESTINATION")
+            
+            # Add BasicConfig properties and track their provenance
+            basic_props = BasicConfig().props()
+            for key, value in basic_props.items():
+                self._track_computed_parameter(key, value, f"autosubmit.config.BasicConfig.{key}")
+            self.experiment_data.update(basic_props)
+            
+            # Track environment variables provenance
+            for key in self.experiment_data.keys():
+                if key.startswith("AS_ENV_"):
+                    env_name = key.replace("AS_ENV_", "")
+                    self._track_computed_parameter(
+                        key,
+                        self.experiment_data[key],
+                        f"environment:${env_name}"
+                    )
+            
+            # Track BasicConfig properties provenance
+            basic_props = BasicConfig().props()
+            for key, value in basic_props.items():
+                if key in self.experiment_data:
+                    self._track_computed_parameter(
+                        key,
+                        value,
+                        f"autosubmit.config.BasicConfig.{key}"
+                    )
+            
+            # Track computed paths
+            self._track_computed_parameter(
+                "ROOTDIR",
+                self.experiment_data['ROOTDIR'],
+                "computed:LOCAL_ROOT_DIR/EXPID"
+            )
+            self._track_computed_parameter(
+                "PROJDIR",
+                self.experiment_data['PROJDIR'],
+                "computed:PROJECT_DESTINATION"
+            )
             
             # Provenance tracking is always enabled - no deferred checks needed
             Log.info(f"[PROV-DEBUG] Provenance tracking is always enabled")
@@ -1970,6 +2052,12 @@ class AutosubmitConfig(object):
                     cwd=project_dir,
                     shell=True
                 ).decode(locale.getpreferredencoding()).strip("\n")
+                # Track workflow commit provenance
+                self._track_computed_parameter(
+                    "AUTOSUBMIT.WORKFLOW_COMMIT",
+                    self.experiment_data["AUTOSUBMIT"]["WORKFLOW_COMMIT"],
+                    f"git:{project_dir}/.git/HEAD"
+                )
 
     def load_current_hpcarch_parameters(self, parameters: Optional[dict] = None) -> None:
         """Load custom HPCARCH parameters.
@@ -1983,9 +2071,24 @@ class AutosubmitConfig(object):
         target = parameters if parameters is not None else self.experiment_data
 
         for name, value in hpcarch_data.items():
-            target[f"HPC{name}"] = value
+            hpc_param = f"HPC{name}"
+            target[hpc_param] = value
+            # Track HPC parameter provenance (only when using experiment_data)
+            if parameters is None:
+                self._track_computed_parameter(
+                    hpc_param,
+                    value,
+                    f"computed:PLATFORMS.{hpcarch}.{name}"
+                )
 
         target["HPCARCH"] = hpcarch
+        # Track HPCARCH provenance (only when using experiment_data)
+        if parameters is None:
+            self._track_computed_parameter(
+                "HPCARCH",
+                hpcarch,
+                "computed:DEFAULT.HPCARCH"
+            )
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
         project = hpcarch_data.get("SCRATCH_PROJECT_DIR", hpcarch_data.get("PROJECT", ""))
@@ -2003,8 +2106,38 @@ class AutosubmitConfig(object):
         if target.get("HPCROOTDIR", None) and target.get("HPCLOGDIR", None):
             target["HPCROOTDIR"] = str(target["HPCROOTDIR"])
             target["HPCLOGDIR"] = str(target["HPCLOGDIR"])
+            # Track computed root/log directories (only when using experiment_data)
+            if parameters is None:
+                self._track_computed_parameter(
+                    "HPCROOTDIR",
+                    target["HPCROOTDIR"],
+                    f"computed:PLATFORMS.{hpcarch}.SCRATCH_DIR/PROJECT/USER/LOG_EXPID"
+                )
+                self._track_computed_parameter(
+                    "HPCLOGDIR",
+                    target["HPCLOGDIR"],
+                    f"computed:HPCROOTDIR/LOG_EXPID"
+                )
 
         self.substitute_dynamic_variables(target)
+
+    def _track_computed_parameter(self, param_path: str, value: Any, source_description: str) -> None:
+        """Track computed/system parameters with descriptive sources.
+        
+        Args:
+            param_path: Dot-separated path (e.g., "HPCTYPE" or "AUTOSUBMIT.WORKFLOW_COMMIT")
+            value: Parameter value
+            source_description: Human-readable source (e.g., "computed:PLATFORMS.LOCAL.TYPE")
+        """
+        if not self.track_provenance or self.provenance_tracker is None:
+            return
+        
+        self.provenance_tracker.track(
+            param_path=param_path,
+            file=source_description,
+            line=None,
+            col=None
+        )
 
     def get_parameter_source(self, param_path: str) -> Optional[dict]:
         """Get the source information for a specific parameter.
@@ -2082,8 +2215,8 @@ class AutosubmitConfig(object):
         Example:
             Output in YAML:
             DEFAULT:
-              EXPID: a000  # Source: /path/to/minimal.yml
-              HPCARCH: nord3v2  # Source: /path/to/main.yml
+              EXPID: a000  # Source: /path/to/minimal.yml:10:3 [DEFAULT.EXPID]
+              HPCARCH: nord3v2  # Source: /path/to/main.yml:15:5 [DEFAULT.HPCARCH]
         """
         # Create CommentedMap and check if tracking is enabled
         if not self.track_provenance or not self.provenance_tracker:
@@ -2107,6 +2240,9 @@ class AutosubmitConfig(object):
                     source = prov_entry.file
                     if prov_entry.line:
                         source = f"{source}:{prov_entry.line}"
+                        if prov_entry.col:
+                            source = f"{source}:{prov_entry.col}"
+                    source = f"{source} [{param_path}]"
                     commented_data.yaml_add_eol_comment(f"From: {source}", key)
                     comments_added += 1
                     Log.debug(f"[PROV] Added section comment: {param_path}")
@@ -2118,6 +2254,9 @@ class AutosubmitConfig(object):
                     source = prov_entry.file
                     if prov_entry.line:
                         source = f"{source}:{prov_entry.line}"
+                        if prov_entry.col:
+                            source = f"{source}:{prov_entry.col}"
+                    source = f"{source} [{param_path}]"
                     commented_data.yaml_add_eol_comment(f"Source: {source}", key)
                     comments_added += 1
                     Log.debug(f"[PROV] Added leaf comment: {param_path} -> {source}")
