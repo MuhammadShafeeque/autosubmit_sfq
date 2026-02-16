@@ -1910,7 +1910,7 @@ class AutosubmitConfig(object):
                     self.track_provenance = True
                     self.provenance_tracker = ProvenanceTracker()
                     # Re-track all configuration (reload config files)
-                    Log.get_logger("Autosubmit").info("Provenance tracking enabled - reloading configuration")
+                    Log.info("Provenance tracking enabled - reloading configuration")
             
             self.misc_data = {}
             self.misc_files = list(set(self.misc_files))
@@ -2032,7 +2032,7 @@ class AutosubmitConfig(object):
             >>> config.export_provenance("/path/to/provenance.json")
         """
         if not self.provenance_tracker:
-            Log.get_logger("Autosubmit").warning("No provenance data to export")
+            Log.warning("No provenance data to export")
             return
         
         prov_data = self.provenance_tracker.export_to_dict()
@@ -2040,7 +2040,7 @@ class AutosubmitConfig(object):
         with open(filepath, 'w') as f:
             json.dump(prov_data, f, indent=2)
         
-        Log.get_logger("Autosubmit").info(f"Provenance data exported to {filepath}")
+        Log.info(f"Provenance data exported to {filepath}")
 
     def save(self) -> None:
         """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file."""
@@ -2059,7 +2059,7 @@ class AutosubmitConfig(object):
                     provenance_data = self.provenance_tracker.export_to_dict()
                     if provenance_data:
                         self.experiment_data["PROVENANCE"] = provenance_data
-                        Log.get_logger("Autosubmit").debug(
+                        Log.debug(
                             f"Added PROVENANCE section with {len(self.provenance_tracker)} parameters"
                         )
                 
