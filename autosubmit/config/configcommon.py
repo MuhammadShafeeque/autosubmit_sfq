@@ -735,7 +735,7 @@ class AutosubmitConfig(object):
             file_path: Path to the YAML file
             prefix: Dot-separated path prefix for nested keys
         """
-        if not self.track_provenance or not self.provenance_tracker:
+        if not self.track_provenance or self.provenance_tracker is None:
             return
         
         params_tracked = 0
