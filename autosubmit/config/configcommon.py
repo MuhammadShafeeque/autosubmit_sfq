@@ -738,25 +738,28 @@ class AutosubmitConfig(object):
             return
         
         params_tracked = 0
+        total_keys = 0
         for key, value in data.items():
+            total_keys += 1
             param_path = f"{prefix}.{key}" if prefix else key
+            
+            # Track this parameter (both dict sections and leaf values)
+            self.provenance_tracker.track(
+                param_path=param_path,
+                file=file_path,
+                line=None,  # TODO: Line numbers when parser supports it
+                col=None
+            )
+            params_tracked += 1
+            Log.debug(f"[PROV] Tracked: {param_path} -> {file_path}")
             
             if isinstance(value, dict):
                 # Recursively track nested parameters
                 self._track_yaml_provenance(value, file_path, param_path)
-            else:
-                # Track this parameter
-                self.provenance_tracker.track(
-                    param_path=param_path,
-                    file=file_path,
-                    line=None,  # TODO: Line numbers when parser supports it
-                    col=None
-                )
-                params_tracked += 1
         
         # Log tracking progress (only for top-level calls)
-        if not prefix and params_tracked > 0:
-            Log.info(f"Tracked {params_tracked} parameters from {file_path}")
+        if not prefix:
+            Log.info(f"Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters (including sections)")
 
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
@@ -2078,10 +2081,13 @@ class AutosubmitConfig(object):
               EXPID: a000  # Source: /path/to/minimal.yml
               HPCARCH: nord3v2  # Source: /path/to/main.yml
         """
-        commented_data = CommentedMap(data)
-        
+        # Create CommentedMap and check if tracking is enabled
         if not self.track_provenance or not self.provenance_tracker:
-            return commented_data
+            return CommentedMap(data)
+        
+        # Process all items and build CommentedMap with proper nesting
+        commented_data = CommentedMap()
+        comments_added = 0
         
         for key, value in data.items():
             param_path = f"{prefix}.{key}" if prefix else key
@@ -2098,12 +2104,24 @@ class AutosubmitConfig(object):
                     if prov_entry.line:
                         source = f"{source}:{prov_entry.line}"
                     commented_data.yaml_add_eol_comment(f"From: {source}", key)
-            elif prov_entry:
-                # Add end-of-line comment for leaf values
-                source = prov_entry.file
-                if prov_entry.line:
-                    source = f"{source}:{prov_entry.line}"
-                commented_data.yaml_add_eol_comment(f"Source: {source}", key)
+                    comments_added += 1
+                    Log.debug(f"[PROV] Added section comment: {param_path}")
+            else:
+                # Copy the value first
+                commented_data[key] = value
+                # Then add comment if provenance exists
+                if prov_entry:
+                    source = prov_entry.file
+                    if prov_entry.line:
+                        source = f"{source}:{prov_entry.line}"
+                    commented_data.yaml_add_eol_comment(f"Source: {source}", key)
+                    comments_added += 1
+                    Log.debug(f"[PROV] Added leaf comment: {param_path} -> {source}")
+                else:
+                    Log.debug(f"[PROV] No provenance found for: {param_path}")
+        
+        if not prefix and comments_added > 0:
+            Log.info(f"Added {comments_added} provenance comments to top-level data")
         
         return commented_data
 
@@ -2126,10 +2144,13 @@ class AutosubmitConfig(object):
                     Log.info(f"Adding provenance comments for {num_tracked} tracked parameters")
                     if num_tracked > 0:
                         # Show first few tracked parameters as examples
-                        examples = list(self.provenance_tracker.provenance_map.keys())[:3]
+                        examples = list(self.provenance_tracker.provenance_map.keys())[:5]
                         Log.info(f"Example tracked parameters: {', '.join(examples)}")
+                        # Debug: Check data structure
+                        Log.debug(f"[PROV] experiment_data type: {type(self.experiment_data)}")
+                        Log.debug(f"[PROV] experiment_data keys: {list(self.experiment_data.keys())[:10]}")
                     data_to_save = self._add_provenance_comments(self.experiment_data)
-                    Log.info(f"Provenance comments added to YAML output")
+                    Log.info(f"Provenance comments added, data_to_save type: {type(data_to_save)}")
                 else:
                     if not self.track_provenance:
                         Log.info("Provenance tracking is disabled, skipping comments")
@@ -2137,9 +2158,12 @@ class AutosubmitConfig(object):
                         Log.info("Provenance tracker is None, skipping comments")
                 
                 with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
-                    # Not using typ="safe" to preserve the readability of the file
+                    # Configure YAML to preserve comments and maintain readability
                     yaml = YAML()
                     yaml.default_flow_style = False
+                    yaml.preserve_quotes = True
+                    yaml.width = 4096  # Prevent line wrapping
+                    yaml.indent(mapping=2, sequence=2, offset=0)  # Consistent indentation
                     yaml.dump(data_to_save, stream)
                 self.metadata_folder.joinpath("experiment_data.yml").chmod(0o755)
             except Exception as e:
