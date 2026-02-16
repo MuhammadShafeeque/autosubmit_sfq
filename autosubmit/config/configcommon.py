@@ -1874,8 +1874,11 @@ class AutosubmitConfig(object):
                 self.track_provenance = True  # Enable tracking during config load
                 self._provenance_deferred_check = True  # Flag to verify after all configs loaded
             else:
-                self.provenance_tracker = ProvenanceTracker()
-                self._provenance_deferred_check = False
+                # Preserve existing tracker if already exists (don't reset on multiple reloads)
+                if not hasattr(self, 'provenance_tracker') or self.provenance_tracker is None:
+                    self.provenance_tracker = ProvenanceTracker()
+                # Always do deferred check to verify TRACK_PROVENANCE setting
+                self._provenance_deferred_check = True
             
             # Load all the files starting from the $expid/conf folder
             starter_conf = {}
