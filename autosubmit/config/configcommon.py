@@ -1877,8 +1877,10 @@ class AutosubmitConfig(object):
                 # Preserve existing tracker if already exists (don't reset on multiple reloads)
                 if not hasattr(self, 'provenance_tracker') or self.provenance_tracker is None:
                     self.provenance_tracker = ProvenanceTracker()
-                # Always do deferred check to verify TRACK_PROVENANCE setting
-                self._provenance_deferred_check = True
+                # Only do deferred check if we haven't confirmed tracking yet
+                # Once confirmed, don't check again (preserves tracking across reloads)
+                if not getattr(self, '_provenance_confirmed', False):
+                    self._provenance_deferred_check = True
             
             # Load all the files starting from the $expid/conf folder
             starter_conf = {}
@@ -1920,15 +1922,23 @@ class AutosubmitConfig(object):
             self.experiment_data.update(BasicConfig().props())
             
             # Deferred check for TRACK_PROVENANCE after ALL configs loaded (including custom configs)
+            # Only check once and only disable if it was never enabled before
             if hasattr(self, '_provenance_deferred_check') and self._provenance_deferred_check:
                 if self.experiment_data.get("CONFIG", {}).get("TRACK_PROVENANCE", False):
                     self.track_provenance = True
                     Log.info("Provenance tracking enabled (found in configuration)")
                 else:
-                    # Tracking not enabled, discard the tracker
-                    self.provenance_tracker = None
-                    self.track_provenance = False
+                    # Only disable if we haven't confirmed tracking before
+                    # Once enabled, keep it enabled across all reloads
+                    if not getattr(self, '_provenance_confirmed', False):
+                        self.provenance_tracker = None
+                        self.track_provenance = False
+                        Log.debug("Provenance tracking not enabled in configuration")
                 delattr(self, '_provenance_deferred_check')
+                
+                # Mark that we've confirmed the setting (don't change it on future reloads)
+                if self.track_provenance:
+                    self._provenance_confirmed = True
             
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
