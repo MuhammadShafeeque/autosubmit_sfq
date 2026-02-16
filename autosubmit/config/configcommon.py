@@ -735,7 +735,14 @@ class AutosubmitConfig(object):
             file_path: Path to the YAML file
             prefix: Dot-separated path prefix for nested keys
         """
+        # Log entry for top-level calls only
+        if not prefix:
+            Log.info(f"[PROV-TRACK] _track_yaml_provenance called for {file_path}")
+            Log.info(f"[PROV-TRACK] track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None}, data_keys={len(data)}")
+        
         if not self.track_provenance or self.provenance_tracker is None:
+            if not prefix:
+                Log.warning(f"[PROV-TRACK] Early return: track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None}")
             return
         
         params_tracked = 0
@@ -760,7 +767,8 @@ class AutosubmitConfig(object):
         
         # Log tracking progress (only for top-level calls)
         if not prefix:
-            Log.info(f"Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters (including sections)")
+            Log.info(f"[PROV-TRACK] ✓ Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters")
+            Log.info(f"[PROV-TRACK] Current tracker size: {len(self.provenance_tracker.provenance_map)} total parameters tracked")
 
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
@@ -785,7 +793,9 @@ class AutosubmitConfig(object):
         self._delete_autosubmit_calculated_variables(new_file.data)
         
         # Track provenance for loaded parameters
+        Log.info(f"[PROV-LOAD] About to track provenance for {yaml_file}")
         self._track_yaml_provenance(new_file.data, str(Path(yaml_file).resolve()))
+        Log.info(f"[PROV-LOAD] Finished tracking provenance for {yaml_file}")
         
         return self.unify_conf(current_folder_data, new_file.data)
 
