@@ -38,7 +38,7 @@ from importlib.metadata import version
 from importlib.resources import files as read_files
 from pathlib import Path
 from time import sleep
-from typing import Generator, Optional, Union
+from typing import cast, Generator, Optional, Union
 
 from bscearth.utils.date import date2str
 from portalocker import Lock
@@ -52,16 +52,17 @@ from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.configcommon import AutosubmitConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
 from autosubmit.database.db_common import (
-    create_db, delete_experiment, get_experiment_description, get_autosubmit_version, check_experiment_exists,
+    create_db, get_experiment_description, get_autosubmit_version, check_experiment_exists,
     update_experiment_description_version
 )
 from autosubmit.database.db_structure import get_structure
 from autosubmit.experiment.detail_updater import ExperimentDetails
-from autosubmit.experiment.experiment_common import copy_experiment, new_experiment, create_required_folders
+from autosubmit.experiment.experiment_common import (
+    check_ownership, copy_experiment, create_required_folders, delete_experiment, new_experiment
+)
 from autosubmit.git.autosubmit_git import AutosubmitGit
 from autosubmit.git.autosubmit_git import check_unpushed_changes, clean_git
-from autosubmit.helpers.processes import process_id
-from autosubmit.helpers.utils import check_jobs_file_exists, get_rc_path, strtobool
+from autosubmit.helpers.utils import check_jobs_file_exists, get_rc_path, user_yes_no_query
 from autosubmit.history.experiment_history import ExperimentHistory
 from autosubmit.history.experiment_status import ExperimentStatus
 from autosubmit.job.job import Job
@@ -85,9 +86,6 @@ dialog = None
 """Main module for autosubmit. Only contains an interface class to all functionality implemented on autosubmit."""
 
 sys.path.insert(0, os.path.abspath('.'))
-
-
-# noinspection PyUnusedLocal
 
 
 def signal_handler(signal_received, frame):  # noqa: F841
@@ -246,7 +244,8 @@ class Autosubmit:
             # Delete
             subparser = subparsers.add_parser(
                 'delete', description="delete specified experiment")
-            subparser.add_argument('expid', help='experiment identifier')
+            subparser.add_argument('expid', help='experiment identifiers separated by commas',
+                               nargs='?')
             subparser.add_argument(
                 '-f', '--force', action='store_true', help='deletes experiment without confirmation')
             subparser.add_argument('-v', '--update_version', action='store_true',
@@ -712,7 +711,7 @@ class Autosubmit:
             subparser = subparsers.add_parser(
                 'stop', description='Completely stops an autosubmit run process')
             group = subparser.add_mutually_exclusive_group(required=True)
-            group.add_argument('expid', help='experiment identifier, stops each of the listed expid separated by ","',
+            group.add_argument('expid', help='experiment identifiers separated by commas',
                                nargs='?')
             subparser.add_argument('-f', '--force', default=False, action='store_true',
                                    help='Forces to stop autosubmit process, equivalent to kill -9')
@@ -766,7 +765,7 @@ class Autosubmit:
                                     args.git_repo, args.git_branch, args.git_as_conf, args.operational, args.testcase,
                                     args.evaluation, args.use_local_minimal) != ''
         elif args.command == 'delete':
-            return Autosubmit.delete(args.expid, args.force)
+            return delete_experiment(args.expid, args.force)
         elif args.command == 'monitor':
             return Autosubmit.monitor(args.expid, args.output, args.list, args.filter_chunks, args.filter_status,
                                       args.filter_type, args.hide, args.text, args.group_by, args.expand,
@@ -902,7 +901,7 @@ class Autosubmit:
         if args.command == "stop":
             if args.all or args.force_all:
                 expid_less.append("stop")
-        global_log_command = ["delete", "archive", "upgrade"]
+        global_log_command = ["archive", "upgrade"]
         import platform
         fullhost = platform.node()
         if "." in fullhost:
@@ -931,7 +930,9 @@ class Autosubmit:
                 args.command]):
                 raise AutosubmitCritical(message, 7071)
         if (expid != 'None' and expid) and args.command not in expid_less and args.command not in global_log_command:
-            if "," in expid:
+            if isinstance(expid, list):
+                expids = cast(list[str], expid)
+            elif "," in expid:
                 expids = expid.split(",")
             else:
                 expids = expid.split(" ")
@@ -966,12 +967,12 @@ class Autosubmit:
                 os.mkdir(tmp_path)
             if not os.path.exists(aslogs_path):
                 os.mkdir(aslogs_path)
-            if args.command == "stop":
+            if args.command in ['stop', 'delete']:
                 exp_id = "_".join(expids)
                 Log.set_file(os.path.join(BasicConfig.GLOBAL_LOG_DIR,
-                                          args.command + exp_id + '.log'), "out", log_level)
+                                          args.command + '_' + exp_id + '.log'), "out", log_level)
                 Log.set_file(os.path.join(BasicConfig.GLOBAL_LOG_DIR,
-                                          args.command + exp_id + '_err.log'), "err")
+                                          args.command + '_' + exp_id + '_err.log'), "err")
             else:
                 if owner:
                     os.chmod(tmp_path, 0o775)
@@ -1026,7 +1027,9 @@ class Autosubmit:
                                                      f"\nOr with the -v parameter: autosubmit {args.command} {expid} "
                                                      f"-v ", 7014)
         else:
-            if expid == 'None' or not expid:
+            if isinstance(expid, list):
+                exp_id = '_'.join(expid)
+            elif expid == 'None' or not expid:
                 exp_id = ""
             else:
                 exp_id = "_" + expid
@@ -1062,199 +1065,12 @@ class Autosubmit:
     @staticmethod
     def _check_ownership_and_set_last_command(as_conf, expid, command):
         if command not in ["monitor", "describe", "delete", "report", "stats", "dbfix"]:
-            owner, eadmin, current_owner = Autosubmit._check_ownership(expid, raise_error=True)
+            owner, eadmin, current_owner = check_ownership(expid, raise_error=True)
         else:
-            owner, eadmin, current_owner = Autosubmit._check_ownership(expid, raise_error=False)
+            owner, eadmin, current_owner = check_ownership(expid, raise_error=False)
         if owner:
             as_conf.set_last_as_command(command)
         return owner, eadmin, current_owner
-
-    @staticmethod
-    def _check_ownership(expid, raise_error=False):
-        """Check if the user owns and if it is eadmin.
-
-        :return: the owner, eadmin and current_owner
-        :rtype: boolean, boolean, str
-        """
-        current_owner = None
-        eadmin = False
-        owner = False
-        current_user_id = os.getuid()
-        admin_user = "eadmin"  # to be improved in #944
-        try:
-            eadmin = current_user_id == pwd.getpwnam(admin_user).pw_uid
-        except Exception:
-            Log.info(f"Autosubmit admin user: {admin_user} is not set")
-        current_owner_id = Path(BasicConfig.LOCAL_ROOT_DIR, expid).stat().st_uid
-        try:
-            current_owner = pwd.getpwuid(current_owner_id).pw_name
-        except (TypeError, KeyError):
-            Log.warning(f"Current owner of experiment {expid} could not be retrieved. The owner is no longer in the "
-                        f"system database.")
-        if current_owner_id == current_user_id:
-            owner = True
-        elif raise_error:
-            raise AutosubmitCritical(f"You don't own the experiment {expid}.", 7012)
-        return owner, eadmin, current_owner
-
-    @staticmethod
-    def _delete_expid(expid_delete: str, force: bool = False) -> bool:
-        """Removes an experiment from the path and database.
-        If the current user is eadmin and the -f flag has been sent, it deletes regardless of experiment owner.
-
-        :param expid_delete: Identifier of the experiment to delete.
-        :type expid_delete: str
-        :param force: If True, does not ask for confirmation.
-        :type force: bool
-
-        :returns: True if successfully deleted, False otherwise.
-        :rtype: bool
-
-        :raises AutosubmitCritical: If the experiment does not exist or if there are insufficient permissions.
-        """
-
-        if not expid_delete:
-            raise AutosubmitCritical("Experiment identifier is required for deletion.", 7011)
-        experiment_path = Path(f"{BasicConfig.LOCAL_ROOT_DIR}/{expid_delete}")
-        structure_db_path = Path(f"{BasicConfig.STRUCTURES_DIR}/structure_{expid_delete}.db")
-        job_data_db_path = Path(f"{BasicConfig.JOBDATA_DIR}/job_data_{expid_delete}")
-        experiment_path = experiment_path.resolve()
-        structure_db_path = structure_db_path.resolve()
-        job_data_db_path = job_data_db_path.resolve()
-        if Path(BasicConfig.LOCAL_ROOT_DIR) == experiment_path or \
-                Path(BasicConfig.STRUCTURES_DIR) == structure_db_path or \
-                Path(BasicConfig.JOBDATA_DIR) == job_data_db_path:
-            raise AutosubmitCritical(f"Invalid paths for experiment deletion: {expid_delete}. "
-                                     "Paths must not be the root directories.", 7011)
-
-        if not experiment_path.is_relative_to(BasicConfig.LOCAL_ROOT_DIR):
-            raise AutosubmitCritical(f"Invalid paths for experiment deletion: {expid_delete}. "
-                                     "Paths must be within the configured directories.", 7011)
-
-        if not experiment_path.exists():
-            Log.printlog("Experiment directory does not exist.", Log.WARNING)
-            return False
-
-        owner, eadmin, _ = Autosubmit._check_ownership(expid_delete)
-        if not (owner or (force and eadmin)):
-            Autosubmit._raise_permission_error(eadmin, expid_delete)
-
-        message = Autosubmit._generate_deletion_message(expid_delete, experiment_path, structure_db_path,
-                                                        job_data_db_path)
-        error_message = Autosubmit._perform_deletion(experiment_path, structure_db_path, job_data_db_path, expid_delete)
-
-        if not error_message:
-            Log.printlog(message, Log.RESULT)
-        else:
-            Log.printlog(error_message, Log.ERROR)
-            raise AutosubmitError(
-                "Some experiment files weren't correctly deleted\nPlease if the trace shows DATABASE IS LOCKED, report it to git\nIf there are I/O issues, wait until they're solved and then use this command again.\n",
-                error_message, 6004
-            )
-
-        return not bool(error_message)  # if there is a non-empty error, return False
-
-    @staticmethod
-    def _raise_permission_error(eadmin: bool, expid_delete: str) -> None:
-        """Raise a permission error if the current user is not allowed to delete the experiment.
-
-        :param eadmin: Indicates if the current user is an eadmin.
-        :type eadmin: bool
-        :param expid_delete: Identifier of the experiment to delete.
-        :type expid_delete: str
-
-        :raises AutosubmitCritical: If the user does not have permission to delete the experiment.
-        """
-        if not eadmin:
-            raise AutosubmitCritical(
-                f"Detected Eadmin user however, -f flag is not found. {expid_delete} cannot be deleted!", 7012)
-        else:
-            raise AutosubmitCritical(
-                f"Current user is not the owner of the experiment. {expid_delete} cannot be deleted!", 7012)
-
-    @staticmethod
-    def _generate_deletion_message(expid_delete: str, experiment_path: Path, structure_db_path: Path,
-                                   job_data_db_path: Path) -> str:
-        """Generate a message detailing what is being deleted from an experiment.
-
-        :param expid_delete: Identifier of the experiment to delete.
-        :type expid_delete: str
-        :param experiment_path: Path to the experiment directory.
-        :type experiment_path: Path
-        :param structure_db_path: Path to the structure database file.
-        :type structure_db_path: Path
-        :param job_data_db_path: Path to the job data database file.
-        :type job_data_db_path: Path
-
-        :return: A message detailing the deletion of the experiment.
-        :rtype: str
-        """
-        message_parts = [
-            f"The {expid_delete} experiment was removed from the local disk and from the database.",
-            "Note that this action does not delete any data written by the experiment.",
-            "Complete list of files/directories deleted:",
-            ""
-        ]
-        message_parts.extend(f"{path}" for path in experiment_path.rglob('*'))
-        message_parts.append(f"{structure_db_path}")
-        message_parts.append(f"{job_data_db_path}.db")
-        message_parts.append(f"{job_data_db_path}.sql")
-        message = '\n'.join(message_parts)
-        return message
-
-    @staticmethod
-    def _perform_deletion(experiment_path: Path, structure_db_path: Path, job_data_db_path: Path,
-                          expid_delete: str) -> str:
-        """Perform the deletion of an experiment, including its directory, structure database, and job data database.
-
-        :param experiment_path: Path to the experiment directory.
-        :type experiment_path: Path
-        :param structure_db_path: Path to the structure database file.
-        :type structure_db_path: Path
-        :param job_data_db_path: Path to the job data database file.
-        :type job_data_db_path: Path
-        :param expid_delete: Identifier of the experiment to delete.
-        :type expid_delete: str
-        :return: An error message if any errors occurred during deletion, otherwise an empty string.
-        :rtype: str
-        """
-        error_message = ""
-
-        is_sqlite = BasicConfig.DATABASE_BACKEND == 'sqlite'
-
-        Log.info(f"Deleting experiment from {BasicConfig.DATABASE_BACKEND} database...")
-        try:
-            ret = delete_experiment(expid_delete)
-            if ret:
-                Log.result(f"Experiment {expid_delete} deleted")
-        except BaseException as e:
-            error_message += f"Cannot delete experiment entry: {e}\n"
-
-        Log.info("Removing experiment directory...")
-        try:
-            shutil.rmtree(experiment_path)
-        except BaseException as e:
-            error_message += f"Cannot delete directory: {e}\n"
-
-        if is_sqlite:
-            Log.info("Removing Structure db...")
-            try:
-                os.remove(structure_db_path)
-            except BaseException as e:
-                error_message += f"Cannot delete structure: {e}\n"
-
-            Log.info("Removing job_data db...")
-            try:
-                db_path = job_data_db_path.with_suffix(".db")
-                sql_path = job_data_db_path.with_suffix(".sql")
-                if db_path.exists():
-                    os.remove(db_path)
-                if sql_path.exists():
-                    os.remove(sql_path)
-            except BaseException as e:
-                error_message += f"Cannot delete job_data: {e}\n"
-
-        return error_message
 
     @staticmethod
     def copy_as_config(exp_id, copy_id):
@@ -1373,6 +1189,86 @@ class Autosubmit:
                     _add_comments_to_yaml(yaml_data, parameter_comments)
                     yaml.dump(yaml_data, output)
 
+    @staticmethod
+    def replace_parameter_inside_section(content, parameter, new_value, section):
+        # same but for any section any parameter, not only EXPID case insensitive
+        # Find the any section
+        if section:
+            section_match = re.search(rf'({section}:[\s\S]*?{parameter}:.*?)(?=\n|$)', content, re.IGNORECASE)
+            if section_match:
+                section = section_match.group(1)
+                # Replace parameter in the section
+                new_section = re.sub(rf'({parameter}:).*', rf'\1 "{new_value}"', section)
+                # Replace the old section
+                content = content.replace(section, new_section)
+        else:
+            # replace only the parameter
+            content = re.sub(rf'({parameter}:).*', rf'\1 "{new_value}"', content)
+        return content
+
+    @staticmethod
+    def as_conf_default_values(exp_id:str, hpc:str = "local", minimal_configuration:bool = False, git_repo:str = "",
+                               git_branch:str = "main", git_as_conf:str = "") -> None:
+        """Replace default values in as_conf files.
+
+        :param exp_id: experiment id
+        :param hpc: platform
+        :param minimal_configuration: minimal configuration
+        :param git_repo: path to project git repository
+        :param git_branch: main branch
+        :param git_as_conf: path to as_conf file in git repository
+        :return: None
+        """
+        # the var hpc was hardcoded in the header of the function
+
+        # open and replace values
+        for as_conf_file in Path(BasicConfig.LOCAL_ROOT_DIR, f"{exp_id}/conf").iterdir():
+            if as_conf_file.name.endswith(".yml") or as_conf_file.name.endswith(".yaml"):
+                with open(as_conf_file, 'r+') as f:
+                    # Copied files could not have default names.
+                    content = f.read()
+                    search = re.search('AUTOSUBMIT_VERSION: .*', content, re.MULTILINE)
+                    if search is not None:
+                        content = content.replace(search.group(0), f"AUTOSUBMIT_VERSION: \""
+                                                                   f"{Autosubmit.autosubmit_version}\"")
+                    search = re.search('NOTIFICATIONS: .*', content, re.MULTILINE)
+                    if search is not None:
+                        content = content.replace(search.group(0), "NOTIFICATIONS: False")
+                    search = re.search('TO: .*', content, re.MULTILINE)
+                    if search is not None:
+                        content = content.replace(search.group(0), "TO: \"\"")
+                    content = Autosubmit.replace_parameter_inside_section(content, "EXPID", exp_id, "DEFAULT")
+                    search = re.search('HPCARCH: .*', content, re.MULTILINE)
+                    if search is not None:
+                        x = search.group(0).split(":")
+                        # clean blank space, quotes and double quote
+                        aux = x[1].strip(' "\'')
+                        # hpc in config is empty && -H has a value-> write down hpc value
+                        if hpc != "":
+                            content = content.replace(search.group(0), f"HPCARCH: \"{hpc}\"")
+                        elif len(aux) > 0:
+                            content = content.replace(search.group(0), f"HPCARCH: \"{aux}\"")
+                        else:
+                            content = content.replace(search.group(0), "HPCARCH: \"local\"")
+                        # the other case is aux!=0 that we dont care about val(hpc) because its a copyExpId
+                    if minimal_configuration:
+                        search = re.search('CUSTOM_CONFIG: .*', content, re.MULTILINE)
+                        if search is not None:
+                            content = content.replace(search.group(0),
+                                                      "CUSTOM_CONFIG: \"%PROJDIR%/" + git_as_conf + "\"")
+                        search = re.search('PROJECT_ORIGIN: .*', content, re.MULTILINE)
+                        if search is not None:
+                            content = content.replace(search.group(0), f"PROJECT_ORIGIN: \"{git_repo}\"")
+                        search = re.search('PROJECT_PATH: .*', content, re.MULTILINE)
+                        if search is not None:
+                            content = content.replace(search.group(0), f"PROJECT_PATH: \"{git_repo}\"")
+                        search = re.search('PROJECT_BRANCH: .*', content, re.MULTILINE)
+                        if search is not None:
+                            content = content.replace(search.group(0), f"PROJECT_BRANCH: \"{git_branch}\"")
+
+                    f.seek(0)
+                    f.write(content)
+                    f.truncate()
 
     @staticmethod
     def expid(description, hpc="", copy_id='', dummy=False, minimal_configuration=False,
@@ -1486,47 +1382,6 @@ class Autosubmit:
         return exp_id
 
     @staticmethod
-    def delete(expid: str, force: bool) -> bool:
-        """Deletes an experiment from the database,
-        the experiment's folder database entry and all the related metadata files.
-
-        :param expid: Identifier of the experiment to delete.
-        :type expid: str
-        :param force: If True, does not ask for confirmation.
-        :type force: bool
-
-        :returns: True if successful, False otherwise.
-        :rtype: bool
-
-        :raises AutosubmitCritical: If the experiment does not exist or if there are insufficient permissions.
-        """
-        if process_id(expid) is not None:
-            raise AutosubmitCritical("Ensure no processes are running in the experiment directory", 7076)
-
-        experiment_path = Path(f"{BasicConfig.LOCAL_ROOT_DIR}/{expid}")
-
-        if experiment_path.exists():
-            if force or Autosubmit._user_yes_no_query(f"Do you want to delete {expid} ?"):
-                Log.debug(f'Enter Autosubmit._delete_expid {expid}')
-
-                # Try to delete the experiment details
-                try:
-                    ExperimentDetails(expid).delete_details()
-                except Exception:
-                    pass
-
-                try:
-                    return Autosubmit._delete_expid(expid, force)
-                except AutosubmitCritical:
-                    raise
-                except BaseException as e:
-                    raise AutosubmitCritical("Seems that something went wrong, please check the trace", 7012, str(e))
-            else:
-                raise AutosubmitCritical("Insufficient permissions", 7012)
-        else:
-            raise AutosubmitCritical("Experiment does not exist", 7012)
-
-    @staticmethod
     def _load_parameters(as_conf, job_list, platforms):
         """Add parameters from configuration files into platform objects, and into the job_list object.
 
@@ -1568,7 +1423,7 @@ class Autosubmit:
          """
         try:
             Log.info(f"Inspecting experiment {expid}")
-            Autosubmit._check_ownership(expid, raise_error=True)
+            check_ownership(expid, raise_error=True)
             exp_path = os.path.join(BasicConfig.LOCAL_ROOT_DIR, expid)
             tmp_path = os.path.join(exp_path, BasicConfig.LOCAL_TMP_DIR)
             if os.path.exists(os.path.join(tmp_path, 'autosubmit.lock')):
@@ -2606,33 +2461,38 @@ class Autosubmit:
                                                inspect=inspect, only_wrappers=only_wrappers)
                 )
                 wrapper_errors.update(packager.wrappers_with_error)
-                # Jobs that are being retrieved in batch. Right now, only available for slurm platforms.
-
-                if not inspect and len(valid_packages_to_submit) > 0:
-                    job_list.save()
                 save_2 = False
+                # Jobs that are being retrieved in batch. Right now, only available for slurm platforms.
                 if platform.type.lower() in ["slurm", "pjm"] and not inspect and not only_wrappers:
                     # Process the script generated in submit_ready_jobs
                     save_2, valid_packages_to_submit = platform.process_batch_ready_jobs(valid_packages_to_submit,
                                                                                          failed_packages,
                                                                                          error_message="")
-                    if not inspect and len(valid_packages_to_submit) > 0:
-                        job_list.save()
+                if not inspect and len(valid_packages_to_submit) > 0:
+                    job_list.save()
                 # Save wrappers(jobs that has the same id) to be visualized and checked in other parts of the code
                 job_list.save_wrappers(valid_packages_to_submit, failed_packages, as_conf, packages_persistence,
                                        hold=hold, inspect=inspect)
                 if error_message != "":
                     raise AutosubmitCritical(f"Submission Failed due wrong configuration:{error_message}", 7014)
-
-            if wrapper_errors and not any_job_submitted and len(job_list.get_in_queue()) == 0:
-                # Deadlock situation
-                err_msg = ""
-                for wrapper in wrapper_errors:
-                    err_msg += f"wrapped_jobs:{wrapper} in {wrapper_errors[wrapper]}\n"
-                raise AutosubmitCritical(err_msg, 7014)
+            Autosubmit.check_deadlock(wrapper_errors, any_job_submitted, job_list)
             return save_1 or save_2
         except Exception:
             raise
+
+    @staticmethod
+    def check_deadlock(wrapper_errors: dict, any_job_submitted: bool, job_list: JobList) -> None:
+        """Check for deadlock situations and raise an exception if detected.
+        :param wrapper_errors: Dictionary of wrapper errors.
+        :param any_job_submitted: Boolean indicating if any job was submitted.
+        :param job_list: JobList object containing the jobs.
+        """
+        if wrapper_errors and not any_job_submitted and len(job_list.get_in_queue()) == 0:
+            # Deadlock situation
+            err_msg = ""
+            for wrapper in wrapper_errors:
+                err_msg += f"wrapped_jobs:{wrapper} in {wrapper_errors[wrapper]}\n"
+            raise AutosubmitCritical(err_msg, 7014)
 
     @staticmethod
     def monitor(expid: str, file_format: str, lst: str, filter_chunks: str, filter_status: str, filter_section: str,
@@ -3015,7 +2875,7 @@ class Autosubmit:
         if not save:
             Log.warning("Changes will be NOT saved to the jobList. Use -s option to save")
 
-        Autosubmit._check_ownership(expid, raise_error=True)
+        check_ownership(expid, raise_error=True)
         exp_path = os.path.join(BasicConfig.LOCAL_ROOT_DIR, expid)
         as_conf = AutosubmitConfig(expid, BasicConfig, YAMLParserFactory())
         as_conf.check_conf_files(True)
@@ -3796,7 +3656,7 @@ class Autosubmit:
         :type expid: str
         """
         try:
-            Autosubmit._check_ownership(expid, raise_error=True)
+            check_ownership(expid, raise_error=True)
             as_conf = AutosubmitConfig(expid, BasicConfig, YAMLParserFactory())
             as_conf.reload(force_load=True)
             # as_conf.check_conf_files(False)
@@ -3825,7 +3685,7 @@ class Autosubmit:
         :param expid: experiment identifier
         :type expid: str
         """
-        Autosubmit._check_ownership(expid, raise_error=True)
+        check_ownership(expid, raise_error=True)
 
         as_conf = AutosubmitConfig(expid, BasicConfig, YAMLParserFactory())
         as_conf.reload(force_load=True)
@@ -3915,7 +3775,7 @@ class Autosubmit:
         Log.info("Checking if experiment exists...")
         try:
             # Check that the user is the owner and the configuration is well configured
-            Autosubmit._check_ownership(expid, raise_error=True)
+            check_ownership(expid, raise_error=True)
             folder = Path(BasicConfig.LOCAL_ROOT_DIR) / expid / "conf"
             factory = YAMLParserFactory()
             # update scripts to yml format
@@ -4035,7 +3895,7 @@ class Autosubmit:
                         _stat = os.stat(current_pkl_path)
                         if _stat.st_size > 6:
                             # Greater than 6 bytes -> Not empty
-                            if not force and not Autosubmit._user_yes_no_query(
+                            if not force and not user_yes_no_query(
                                     f"The current pkl file {current_pkl_path} is not empty. Do you want to continue?"
                             ):
                                 # The user chooses not to continue. Operation stopped.
@@ -4453,7 +4313,7 @@ class Autosubmit:
 
         # checking if there is a lock file to avoid multiple running on the same expid
         try:
-            Autosubmit._check_ownership(expid, raise_error=True)
+            check_ownership(expid, raise_error=True)
             exp_path = os.path.join(BasicConfig.LOCAL_ROOT_DIR, expid)
             tmp_path = os.path.join(exp_path, BasicConfig.LOCAL_TMP_DIR)
             with Lock(os.path.join(tmp_path, 'autosubmit.lock'), timeout=1) as fh:
@@ -5240,7 +5100,7 @@ class Autosubmit:
         for f in [filter_chunks, filter_type_chunk, filter_type_chunk_split]:
             filter_chunk_section_split = f if f else filter_chunk_section_split
 
-        Autosubmit._check_ownership(expid, raise_error=True)
+        check_ownership(expid, raise_error=True)
         exp_path = os.path.join(BasicConfig.LOCAL_ROOT_DIR, expid)
         tmp_path = os.path.join(exp_path, BasicConfig.LOCAL_TMP_DIR)
         try:
@@ -5443,29 +5303,6 @@ class Autosubmit:
                 return True
         except Exception:
             raise
-
-    @staticmethod
-    def _user_yes_no_query(question):
-        """Utility function to ask user a yes/no question.
-
-        :param question: question to ask
-        :type question: str
-        :return: True if answer is yes, False if it is no
-        :rtype: bool
-        """
-        sys.stdout.write(f'{question} [y/n]\n')
-        while True:
-            try:
-                if sys.version_info[0] == 3:
-                    answer = input()
-                else:
-                    # noinspection PyCompatibility
-                    answer = input()
-                return strtobool(answer.lower())
-            except EOFError as e:
-                raise AutosubmitCritical("No input detected, the experiment won't be erased.", 7011, str(e))
-            except ValueError:
-                sys.stdout.write('Please respond with \'y\' or \'n\'.\n')
 
     @staticmethod
     def _get_status(s):
