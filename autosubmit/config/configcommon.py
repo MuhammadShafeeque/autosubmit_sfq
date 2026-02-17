@@ -67,8 +67,6 @@ class AutosubmitConfig(object):
         self.current_loaded_files: dict = {}
         self.provenance_tracker: ProvenanceTracker = ProvenanceTracker()
         self.track_provenance: bool = True
-        print(f"\n[PROVENANCE-INIT] Tracker created in __init__() for expid={expid}", flush=True)
-        Log.info(f"[PROV-DEBUG] __init__() tracker created - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}")
         self.conf_folder_yaml = Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf")
         if not Path(BasicConfig.LOCAL_ROOT_DIR, expid, "conf").exists():
             raise IOError(f"Experiment {expid}/conf does not exist")
@@ -735,13 +733,9 @@ class AutosubmitConfig(object):
         """
         # Log entry for top-level calls only
         if not prefix:
-            print(f"[PROVENANCE-TRACK] Tracking {len(data)} keys from {Path(file_path).name}", flush=True)
-            Log.info(f"[PROV-TRACK] _track_yaml_provenance called for {file_path}")
-            Log.info(f"[PROV-TRACK] track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None}, data_keys={len(data)}")
+            Log.debug(f"[PROV-TRACK] _track_yaml_provenance called for {file_path}")
         
         if not self.track_provenance or self.provenance_tracker is None:
-            if not prefix:
-                Log.warning(f"[PROV-TRACK] Early return: track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None}")
             return
         
         params_tracked = 0
@@ -784,9 +778,8 @@ class AutosubmitConfig(object):
         
         # Log tracking progress (only for top-level calls)
         if not prefix:
-            print(f"[PROVENANCE-TRACK] ✓ Tracked {params_tracked} parameters, tracker size now: {len(self.provenance_tracker.provenance_map)}", flush=True)
-            Log.info(f"[PROV-TRACK] ✓ Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters")
-            Log.info(f"[PROV-TRACK] Current tracker size: {len(self.provenance_tracker.provenance_map)} total parameters tracked")
+            Log.debug(f"[PROV-TRACK] ✓ Processed {total_keys} keys from {file_path}, tracked {params_tracked} parameters")
+            Log.debug(f"[PROV-TRACK] Current tracker size: {len(self.provenance_tracker.provenance_map)} total parameters tracked")
 
     def _track_computed_parameter(self, param_path: str, value: Any, source_description: str):
         """Track computed/system parameters with descriptive sources.
@@ -823,7 +816,7 @@ class AutosubmitConfig(object):
             return
         
         if not prefix:
-            Log.info(f"[PROV-MERGED] Tracking merged config keys from {Path(file_path).name}")
+            Log.debug(f"[PROV-MERGED] Tracking merged config keys from {Path(file_path).name}")
         
         params_tracked = 0
         for key, value in data.items():
@@ -850,7 +843,7 @@ class AutosubmitConfig(object):
                 self._track_dict_keys_only(value, file_path, param_path)
         
         if not prefix:
-            Log.info(f"[PROV-MERGED] ✓ Tracked {params_tracked} merged parameters from {Path(file_path).name}")
+            Log.debug(f"[PROV-MERGED] ✓ Tracked {params_tracked} merged parameters from {Path(file_path).name}")
 
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
         """Load a config file and parse it
@@ -867,9 +860,9 @@ class AutosubmitConfig(object):
         
         # Track BEFORE normalization (while .lc metadata still exists)
         if self.track_provenance and self.provenance_tracker is not None:
-            Log.info(f"[PROV-LOAD] Tracking provenance BEFORE normalization for {yaml_file}")
+            Log.debug(f"[PROV-LOAD] Tracking provenance BEFORE normalization for {yaml_file}")
             self._track_yaml_provenance(new_file.data, str(Path(yaml_file).resolve()))
-            Log.info(f"[PROV-LOAD] Finished tracking provenance for {yaml_file}")
+            Log.debug(f"[PROV-LOAD] Finished tracking provenance for {yaml_file}")
         
         new_file.data = self.normalize_variables(new_file.data.copy(),
                                                  must_exists=False)  # TODO Figure out why this .copy is needed
@@ -887,9 +880,9 @@ class AutosubmitConfig(object):
         # Track the MERGED result - even without line/col, we track which file it came from
         # This fixes the problem where deep_update() creates new dicts that lose provenance
         if self.track_provenance and self.provenance_tracker is not None:
-            Log.info(f"[PROV-LOAD] Tracking merged result from {yaml_file}")
+            Log.debug(f"[PROV-LOAD] Tracking merged result from {yaml_file}")
             self._track_dict_keys_only(unified_result, str(Path(yaml_file).resolve()))
-            Log.info(f"[PROV-LOAD] Finished tracking merged result")
+            Log.debug(f"[PROV-LOAD] Finished tracking merged result")
         
         return unified_result
 
@@ -1972,12 +1965,9 @@ class AutosubmitConfig(object):
         # Reload only the files that have been modified.
         # Only reload the data if there are changes or there is no data loaded yet.
         if force_load or self.needs_reload():
-            # Log point 1: Start of reload()
-            Log.info(f"[PROV-DEBUG] reload() called - force_load={force_load}, only_experiment_data={only_experiment_data}, track_provenance={self.track_provenance}")
             # Ensure provenance tracker always exists
             if not hasattr(self, 'provenance_tracker') or self.provenance_tracker is None:
                 self.provenance_tracker = ProvenanceTracker()
-                Log.info(f"[PROV-DEBUG] Initialized ProvenanceTracker")
             
             # Load all the files starting from the $expid/conf folder
             starter_conf = {}
@@ -2062,10 +2052,6 @@ class AutosubmitConfig(object):
                 self.experiment_data['PROJDIR'],
                 "computed:PROJECT_DESTINATION"
             )
-            
-            # Provenance tracking is always enabled - no deferred checks needed
-            Log.info(f"[PROV-DEBUG] Provenance tracking is always enabled")
-            Log.info(f"[PROV-DEBUG] End of reload() - tracker_is_none={self.provenance_tracker is None}, tracker_type={type(self.provenance_tracker)}, num_tracked={len(self.provenance_tracker.provenance_map) if self.provenance_tracker else 0}")
             
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
@@ -2354,10 +2340,6 @@ class AutosubmitConfig(object):
             try:
                 # Add provenance as inline comments if tracking is enabled
                 data_to_save = self.experiment_data
-                # Log point 9: In save() method before provenance check
-                tracker_size = len(self.provenance_tracker.provenance_map) if hasattr(self, 'provenance_tracker') and self.provenance_tracker else 0
-                print(f"\n[PROVENANCE-SAVE] save() called, tracker has {tracker_size} parameters\n", flush=True)
-                Log.info(f"[PROV-DEBUG] save() called - track_provenance={self.track_provenance}, tracker_is_none={self.provenance_tracker is None if hasattr(self, 'provenance_tracker') else 'no_attr'}")
                 if self.track_provenance and self.provenance_tracker is not None:
                     num_tracked = len(self.provenance_tracker.provenance_map)
                     Log.info(f"Adding provenance comments for {num_tracked} tracked parameters")
@@ -2365,9 +2347,6 @@ class AutosubmitConfig(object):
                         # Show first few tracked parameters as examples
                         examples = list(self.provenance_tracker.provenance_map.keys())[:5]
                         Log.info(f"Example tracked parameters: {', '.join(examples)}")
-                        # Debug: Check data structure
-                        Log.debug(f"[PROV] experiment_data type: {type(self.experiment_data)}")
-                        Log.debug(f"[PROV] experiment_data keys: {list(self.experiment_data.keys())[:10]}")
                     data_to_save = self._add_provenance_comments(self.experiment_data)
                     Log.info(f"Provenance comments added, data_to_save type: {type(data_to_save)}")
                 else:
