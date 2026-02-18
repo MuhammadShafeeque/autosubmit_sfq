@@ -92,7 +92,7 @@ class AutosubmitConfig(object):
     @property
     def jobs_data(self) -> dict[str, Any]:
         try:
-            return self.experiment_data["JOBS"]
+            return clean_provenance(self.experiment_data["JOBS"])
         except KeyError:
             raise AutosubmitCritical(
                 "JOBS section not found in configuration file", 7014
@@ -103,7 +103,7 @@ class AutosubmitConfig(object):
     @property
     def platforms_data(self) -> dict[str, Any]:
         try:
-            return self.experiment_data["PLATFORMS"]
+            return clean_provenance(self.experiment_data["PLATFORMS"])
         except KeyError:
             raise AutosubmitCritical(
                 "PLATFORMS section not found in configuration file", 7014
@@ -145,7 +145,7 @@ class AutosubmitConfig(object):
     def get_full_config_as_json(self):
         """Return config as json object"""
         try:
-            return json.dumps(self.experiment_data)
+            return json.dumps(clean_provenance(self.experiment_data))
         except Exception as e:
             Log.warning(f"Autosubmit was not able to retrieve and save the configuration "
                         f"into the historical database: {str(e)}")
@@ -2706,7 +2706,7 @@ class AutosubmitConfig(object):
         :return: expression
         :rtype: dict
         """
-        return self.experiment_data.get("WRAPPERS", {})
+        return clean_provenance(self.experiment_data.get("WRAPPERS", {}))
 
     def get_wrapper_jobs(self, wrapper=None):
         """Returns the jobs that should be wrapped, configured in the autosubmit's config.
@@ -2933,5 +2933,5 @@ class AutosubmitConfig(object):
         """
         for wrapper in self.experiment_data.get("WRAPPERS", {}).values():
             if isinstance(wrapper, dict) and section in wrapper.get("JOBS_IN_WRAPPER", []):
-                return wrapper
+                return clean_provenance(wrapper)
         return {}

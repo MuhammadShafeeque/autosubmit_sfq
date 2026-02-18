@@ -35,6 +35,7 @@ from bscearth.utils.date import date2str, parse_date, previous_day, chunk_end_da
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.configcommon import AutosubmitConfig
 from autosubmit.helpers.parameters import autosubmit_parameter, autosubmit_parameters
+from yaml_provenance import clean_provenance
 from autosubmit.history.experiment_history import ExperimentHistory
 from autosubmit.job.job_common import Status, increase_wallclock_by_chunk
 from autosubmit.job.job_utils import get_job_package_code, get_split_size_unit, get_split_size
@@ -1550,7 +1551,7 @@ class Job(object):
 
         # Get the defined metric folder from the configuration if it exists
         try:
-            config_section: dict = as_conf.experiment_data.get("CONFIG", {})
+            config_section: dict = clean_provenance(as_conf.experiment_data.get("CONFIG", {}))
             base_path = Path(config_section.get("METRIC_FOLDER", base_path))
         except Exception as exc:
             Log.printlog(f"Failed to get metric folder from config: {exc}", code=6019)
@@ -1924,7 +1925,7 @@ class Job(object):
         return parameters
 
     def update_wrapper_parameters(self, as_conf: AutosubmitConfig, parameters: dict) -> dict:
-        wrappers = as_conf.experiment_data.get("WRAPPERS", {})
+        wrappers = clean_provenance(as_conf.experiment_data.get("WRAPPERS", {}))
         if len(wrappers) > 0:
             parameters['WRAPPER'] = as_conf.get_wrapper_type()
             parameters['WRAPPER' + "_POLICY"] = as_conf.get_wrapper_policy()
@@ -1936,22 +1937,22 @@ class Job(object):
             if type(wrapper_val) is not dict:
                 continue
             parameters[wrapper_section] = as_conf.get_wrapper_type(
-                as_conf.experiment_data["WRAPPERS"].get(wrapper_section))
+                clean_provenance(as_conf.experiment_data["WRAPPERS"].get(wrapper_section)))
             parameters[wrapper_section + "_POLICY"] = as_conf.get_wrapper_policy(
-                as_conf.experiment_data["WRAPPERS"].get(wrapper_section))
+                clean_provenance(as_conf.experiment_data["WRAPPERS"].get(wrapper_section)))
             parameters[wrapper_section + "_METHOD"] = as_conf.get_wrapper_method(
-                as_conf.experiment_data["WRAPPERS"].get(wrapper_section)).lower()
+                clean_provenance(as_conf.experiment_data["WRAPPERS"].get(wrapper_section))).lower()
             parameters[wrapper_section + "_JOBS"] = as_conf.get_wrapper_jobs(
-                as_conf.experiment_data["WRAPPERS"].get(wrapper_section))
+                clean_provenance(as_conf.experiment_data["WRAPPERS"].get(wrapper_section)))
             parameters[wrapper_section + "_EXTENSIBLE"] = int(
-                as_conf.get_extensible_wallclock(as_conf.experiment_data["WRAPPERS"].get(wrapper_section)))
+                as_conf.get_extensible_wallclock(clean_provenance(as_conf.experiment_data["WRAPPERS"].get(wrapper_section))))
         return parameters
 
     def update_dict_parameters(self, as_conf: AutosubmitConfig) -> None:
         self.retrials = as_conf.jobs_data.get(self.section, {}).get("RETRIALS",
-                                                                    as_conf.experiment_data.get("CONFIG", {}).get(
+                                                                    clean_provenance(as_conf.experiment_data.get("CONFIG", {})).get(
                                                                         "RETRIALS", 0))
-        for wrapper_data in (wrapper for wrapper in as_conf.experiment_data.get("WRAPPERS", {}).values() if
+        for wrapper_data in (wrapper for wrapper in clean_provenance(as_conf.experiment_data.get("WRAPPERS", {})).values() if
                              type(wrapper) is dict):
             jobs_in_wrapper = wrapper_data.get("JOBS_IN_WRAPPER", [])
             if self.section.upper() in jobs_in_wrapper:
@@ -1962,7 +1963,7 @@ class Job(object):
         self.dependencies = str(as_conf.jobs_data.get(self.section, {}).get("DEPENDENCIES", ""))
         self.running = as_conf.jobs_data.get(self.section, {}).get("RUNNING", "once")
         self.platform_name = as_conf.jobs_data.get(self.section, {}).get("PLATFORM",
-                                                                         as_conf.experiment_data.get("DEFAULT", {}).get(
+                                                                         clean_provenance(as_conf.experiment_data.get("DEFAULT", {})).get(
                                                                              "HPCARCH", None))
         self.file = as_conf.jobs_data.get(self.section, {}).get("FILE", None)
         self.additional_files = as_conf.jobs_data.get(self.section, {}).get("ADDITIONAL_FILES", [])
@@ -1979,7 +1980,7 @@ class Job(object):
 
     def update_check_variables(self, as_conf: AutosubmitConfig) -> None:
         job_data = as_conf.jobs_data.get(self.section, {})
-        job_platform_name = job_data.get("PLATFORM", as_conf.experiment_data.get("DEFAULT", {}).get("HPCARCH", None))
+        job_platform_name = job_data.get("PLATFORM", clean_provenance(as_conf.experiment_data.get("DEFAULT", {})).get("HPCARCH", None))
         job_platform = job_data.get("PLATFORMS", {}).get(job_platform_name, {})
         self.check = job_data.get("CHECK", True)
         self.check_warnings = job_data.get("CHECK_WARNINGS", False)
@@ -2011,9 +2012,9 @@ class Job(object):
         job_data = as_conf.jobs_data.get(self.section, {})
         if job_data.get("SPLITS", None) and self.running != "once":  # once jobs has no date
             # total_split = int(self.splits)
-            split_unit = get_split_size_unit(as_conf.experiment_data, self.section)
+            split_unit = get_split_size_unit(clean_provenance(as_conf.experiment_data), self.section)
             cal = str(parameters.get('EXPERIMENT.CALENDAR', "standard")).lower()
-            split_length = get_split_size(as_conf.experiment_data, self.section)
+            split_length = get_split_size(clean_provenance(as_conf.experiment_data), self.section)
             start_date = parameters.get('CHUNK_START_DATE', None)
             if set_attributes and start_date:
                 self.date_split = datetime.datetime.strptime(start_date, "%Y%m%d")
@@ -2203,7 +2204,7 @@ class Job(object):
     def reset_logs(self, as_conf: AutosubmitConfig) -> None:
         self.log_recovered = False
         self.packed_during_building = False
-        self.workflow_commit = as_conf.experiment_data.get("AUTOSUBMIT", {}).get("WORKFLOW_COMMIT", "")
+        self.workflow_commit = clean_provenance(as_conf.experiment_data.get("AUTOSUBMIT", {})).get("WORKFLOW_COMMIT", "")
 
     def update_placeholders(self, as_conf: AutosubmitConfig, parameters: dict, replace_by_empty=False) -> dict:
         """Find and substitute dynamic placeholders in `parameters` using the provided
@@ -2310,7 +2311,7 @@ class Job(object):
         if not self.platform:
             submitter = ParamikoSubmitter(as_conf=as_conf)
             if not self.platform_name:
-                self.platform_name = as_conf.experiment_data.get("DEFAULT", {}).get("HPCARCH", "LOCAL")
+                self.platform_name = clean_provenance(as_conf.experiment_data.get("DEFAULT", {})).get("HPCARCH", "LOCAL")
             self.platform = submitter.platforms.get(self.platform_name)
 
     def update_content_extra(self, as_conf: AutosubmitConfig, files: list[str]) -> list[str]:
