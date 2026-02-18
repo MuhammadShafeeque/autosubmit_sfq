@@ -35,6 +35,7 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
+from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, dump_yaml
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -80,6 +81,13 @@ class AutosubmitConfig(object):
         self._exp_parser_file = None
         self._conf_parser_file = None
         self.hpcarch = None
+        
+        # Configure yaml-provenance with category hierarchy
+        configure_provenance(ProvenanceConfig(
+            category_hierarchy=[None, "base", "custom_pre", "custom_post"],
+            track_history=False,  # Lightweight mode
+            on_conflict="warn"
+        ))
 
     @property
     def jobs_data(self) -> dict[str, Any]:
@@ -191,7 +199,7 @@ class AutosubmitConfig(object):
         current_level: Union[str, dict] = self.experiment_data.get(section[0], "")
         for param in section[1:]:
             if current_level:
-                if type(current_level) is dict:
+                if isinstance(current_level, dict):
                     current_level = current_level.get(param, d_value)
                 else:
                     if must_exists:
@@ -465,17 +473,29 @@ class AutosubmitConfig(object):
         return normalized_data
 
     def deep_update(self, unified_config, new_dict):
-        """Update a nested dictionary or similar mapping.
-        Modify ``source`` in place.
+        """Update a nested dictionary or similar mapping, preserving provenance.
+        Modify ``unified_config`` in place.
         """
+        # Convert to DictWithProvenance if needed
         if not isinstance(unified_config, collections.abc.Mapping):
-            unified_config = {}
+            unified_config = DictWithProvenance()
+        elif not isinstance(unified_config, DictWithProvenance) and isinstance(unified_config, dict):
+            unified_config = DictWithProvenance(unified_config)
+        
+        # If new_dict is a plain dict, convert it (though it should already be DictWithProvenance from load)
+        if isinstance(new_dict, dict) and not isinstance(new_dict, DictWithProvenance):
+            new_dict = DictWithProvenance(new_dict)
+        
+        # Initialize keys from new_dict in unified_config
         for key in new_dict.keys():
             if key not in unified_config:
                 unified_config[key] = ""
+        
+        # Update with provenance preservation
         for key, val in new_dict.items():
             if isinstance(val, collections.abc.Mapping):
-                tmp = self.deep_update(unified_config.get(key, {}), val)
+                # Recursive merge for nested dicts
+                tmp = self.deep_update(unified_config.get(key, DictWithProvenance()), val)
                 unified_config[key] = tmp
             elif isinstance(val, list):
                 if len(val) > 0 and isinstance(val[0], collections.abc.Mapping):
@@ -485,7 +505,9 @@ class AutosubmitConfig(object):
                     if current_list != val:
                         unified_config[key] = val
             else:
+                # For scalar values, DictWithProvenance's __setitem__ preserves provenance
                 unified_config[key] = new_dict[key]
+        
         return unified_config
 
     def normalize_variables(self, data: dict, must_exists: bool, raise_exception: bool = False) -> dict:
@@ -594,7 +616,7 @@ class AutosubmitConfig(object):
         """
         notify_on = data_fixed["JOBS"][job_section].get("NOTIFY_ON", "")
         if notify_on:
-            if type(notify_on) is str:
+            if isinstance(notify_on, str):
                 if "," in notify_on:
                     notify_on = notify_on.split(",")
                 else:
@@ -610,7 +632,7 @@ class AutosubmitConfig(object):
                 custom_directives = job_data.get("CUSTOM_DIRECTIVES", "")
                 if isinstance(custom_directives, list):
                     custom_directives = str(custom_directives)
-                if type(custom_directives) is str:
+                if isinstance(custom_directives, str):
                     data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = str(custom_directives)
                 else:
                     data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = custom_directives
@@ -671,7 +693,7 @@ class AutosubmitConfig(object):
         elif isinstance(dependencies, dict):
             for dependency, dependency_data in dependencies.items():
                 aux_dependencies[dependency.upper()] = dependency_data
-                if type(dependency_data) is dict and dependency_data.get("STATUS", None):
+                if isinstance(dependency_data, dict) and dependency_data.get("STATUS", None):
                     dependency_data["STATUS"] = dependency_data["STATUS"].upper()
                     if not dependency_data.get("ANY_FINAL_STATUS_IS_VALID", False):
                         if dependency_data["STATUS"][-1] == "?":
@@ -687,7 +709,7 @@ class AutosubmitConfig(object):
 
     @staticmethod
     def _normalize_files(files: Union[str, list[str]]) -> list[str]:
-        if type(files) is not list:
+        if not isinstance(files, list):
             if ',' in files:
                 files = files.split(",")
             elif ' ' in files:
@@ -711,7 +733,7 @@ class AutosubmitConfig(object):
     def convert_list_to_string(self, data):
         """Convert a list to a string
         """
-        if type(data) is dict:
+        if isinstance(data, dict):
             for key, val in data.items():
                 if isinstance(val, list):
                     data[key] = ",".join(val)
@@ -719,18 +741,23 @@ class AutosubmitConfig(object):
                     self.convert_list_to_string(data[key])
         return data
 
-    def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
-        """Load a config file and parse it
+    def load_config_file(self, current_folder_data, yaml_file, load_misc=False, category=None):
+        """Load a config file and parse it with provenance tracking
         :param current_folder_data: current folder data
         :param yaml_file: yaml file to load
         :param load_misc: Whether to load misc files or not
+        :param category: Provenance category for this file (base, custom_pre, custom_post, or None)
         :return: unified config file
         """
 
         # check if path is file o folder
         # load yaml file with ruamel.yaml
+        
+        # Determine category if not provided
+        if category is None:
+            category = self._determine_category(yaml_file)
 
-        new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file)
+        new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file, category=category)
         new_file.data = self.normalize_variables(new_file.data.copy(),
                                                  must_exists=False)  # TODO Figure out why this .copy is needed
         if new_file.data.get("DEFAULT", {}).get("CUSTOM_CONFIG", None) is not None:
@@ -741,6 +768,22 @@ class AutosubmitConfig(object):
             new_file.data = {}
         self._delete_autosubmit_calculated_variables(new_file.data)
         return self.unify_conf(current_folder_data, new_file.data)
+    
+    def _determine_category(self, file_path):
+        """Determine provenance category based on file location
+        
+        :param file_path: Path to the file being loaded
+        :return: Category string ("base", "custom_pre", "custom_post", or None)
+        """
+        file_path_str = str(file_path)
+        
+        # Check if it's in the experiment conf directory (base config)
+        if f"/{self.expid}/conf/" in file_path_str and "CUSTOM_CONFIG" not in file_path_str:
+            return "base"
+        
+        # For custom configs, return None here - will be set explicitly when loading
+        # This allows the load_custom_config methods to specify the correct category
+        return None
 
     # noinspection PyMethodMayBeStatic
     def get_yaml_filenames_to_load(self, yaml_folder, ignore_minimal=False):
@@ -761,15 +804,16 @@ class AutosubmitConfig(object):
                 filenames_to_load.append(str(yaml_file))
         return filenames_to_load
 
-    def load_config_folder(self, current_data, yaml_folder, ignore_minimal=False):
+    def load_config_folder(self, current_data, yaml_folder, ignore_minimal=False, category=None):
         """Load a config folder and return pre and post config
         :param current_data: current data to be updated
         :param yaml_folder: folder to load config
         :param ignore_minimal: ignore minimal config files
+        :param category: Provenance category for files in this folder
         :return: pre and post config
         """
         filenames_to_load = self.get_yaml_filenames_to_load(yaml_folder, ignore_minimal)
-        return self.load_custom_config(current_data, filenames_to_load)
+        return self.load_custom_config(current_data, filenames_to_load, category=category)
 
     def parse_custom_conf_directive(self, custom_conf_directive: Optional[Union[str, dict]]):
         filenames_to_load = dict()
@@ -777,8 +821,8 @@ class AutosubmitConfig(object):
         filenames_to_load["POST"] = []
         if custom_conf_directive is not None:
             # Check if directive is a dictionary
-            if type(custom_conf_directive) is not dict:
-                if type(custom_conf_directive) is str and custom_conf_directive != "":
+            if not isinstance(custom_conf_directive, dict):
+                if isinstance(custom_conf_directive, str) and custom_conf_directive != "":
                     if ',' in custom_conf_directive:
                         filenames_to_load["PRE"] = custom_conf_directive.split(',')
                     else:
@@ -1344,7 +1388,7 @@ class AutosubmitConfig(object):
             if parser_data["CONFIG"].get('TOTALJOBS', -1) == -1:
                 self.wrong_config["Autosubmit"] += [['config',
                                                      "TOTALJOBS parameter not found or non-integer"]]
-            if type(parser_data["CONFIG"].get('RETRIALS', 0)) is not int:
+            if not isinstance(parser_data["CONFIG"].get('RETRIALS', 0), int):
                 parser_data["CONFIG"]['RETRIALS'] = int(parser_data["CONFIG"].get('RETRIALS', 0))
 
         if parser_data.get("STORAGE", None) is None:
@@ -1358,7 +1402,7 @@ class AutosubmitConfig(object):
         if parser_data.get("MAIL", "") != "":
             if str(parser_data["MAIL"].get("NOTIFICATIONS", "false")).lower() == "true":
                 mails = parser_data["MAIL"].get("TO", "")
-                if type(mails) is list:
+                if isinstance(mails, list):
                     pass
                 elif "," in mails:
                     mails = mails.split(',')
@@ -1457,7 +1501,7 @@ class AutosubmitConfig(object):
 
             dependencies = section_data.get('DEPENDENCIES', '')
             if dependencies != "":
-                if type(dependencies) is dict:
+                if isinstance(dependencies, dict):
                     for dependency, values in dependencies.items():
                         if '-' in dependency:
                             dependency = dependency.split('-')[0]
@@ -1521,11 +1565,11 @@ class AutosubmitConfig(object):
                 self.wrong_config["Expdef"] += [['DEFAULT', "Mandatory EXPERIMENT.MEMBERS parameter is invalid"]]
             if parser['EXPERIMENT'].get('CHUNKSIZEUNIT', "").lower() not in ['year', 'month', 'day', 'hour']:
                 self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CHUNKSIZEUNIT choice is invalid"]]
-            if type(parser['EXPERIMENT'].get('CHUNKSIZE', "-1")) not in [int]:
+            if not isinstance(parser['EXPERIMENT'].get('CHUNKSIZE', "-1"), int):
                 if parser['EXPERIMENT']['CHUNKSIZE'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CHUNKSIZE is not defined"]]
                 parser['EXPERIMENT']['CHUNKSIZE'] = int(parser['EXPERIMENT']['CHUNKSIZE'])
-            if type(parser['EXPERIMENT'].get('NUMCHUNKS', "-1")) not in [int]:
+            if not isinstance(parser['EXPERIMENT'].get('NUMCHUNKS', "-1"), int):
                 if parser['EXPERIMENT']['NUMCHUNKS'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.NUMCHUNKS is not defined"]]
                 parser['EXPERIMENT']['NUMCHUNKS'] = int(parser['EXPERIMENT']['NUMCHUNKS'])
@@ -1587,7 +1631,7 @@ class AutosubmitConfig(object):
             wrappers = {}
         for wrapper_name, wrapper_values in wrappers.items():
             # continue if it is a global option (non-dicT)
-            if type(wrapper_values) is not dict:
+            if not isinstance(wrapper_values, dict):
                 continue
             jobs_in_wrapper = wrapper_values.get('JOBS_IN_WRAPPER', [])
             for section in jobs_in_wrapper:
@@ -1670,10 +1714,11 @@ class AutosubmitConfig(object):
         for key in keys_to_delete:
             yaml_data.pop(key, None)
 
-    def load_custom_config(self, current_data, filenames_to_load):
-        """Loads custom config files
+    def load_custom_config(self, current_data, filenames_to_load, category=None):
+        """Loads custom config files with provenance tracking
         :param current_data: dict with current data
         :param filenames_to_load: list of filenames to load
+        :param category: Provenance category ("custom_pre" or "custom_post")
         :return: current_data_pre,current_data_post with unified data
 
         """
@@ -1699,13 +1744,13 @@ class AutosubmitConfig(object):
                 # Load a folder or a file
                 if not filename.is_file():
                     # Load a folder by calling recursively to this function as a list of files
-                    current_data_pre, current_data_post = self.load_config_folder(copy.deepcopy(current_data), filename)
+                    current_data_pre, current_data_post = self.load_config_folder(copy.deepcopy(current_data), filename, category=category)
                     current_data = self.unify_conf(current_data_pre, current_data)
                     current_data = self.unify_conf(current_data, current_data_post)
                 else:
                     # Load a file and unify the current_data with the loaded data
                     current_data = self.unify_conf(current_data,
-                                                   self.load_config_file(current_data, filename))
+                                                   self.load_config_file(current_data, filename, category=category))
                     # Load next level if any
                     custom_conf_directive = current_data.get('DEFAULT', {}).get('CUSTOM_CONFIG', None)
                     filenames_to_load_level = self.parse_custom_conf_directive(custom_conf_directive)
@@ -1719,7 +1764,8 @@ class AutosubmitConfig(object):
                         current_data_pre = self.unify_conf(current_data_pre,
                                                            self.load_custom_config_section(copy.deepcopy(current_data),
                                                                                            filenames_to_load_level[
-                                                                                               "PRE"]))
+                                                                                               "PRE"],
+                                                                                           category="custom_pre"))
                     else:
                         current_data_pre = current_data
                     current_data = self.unify_conf(current_data_pre, current_data)
@@ -1729,7 +1775,8 @@ class AutosubmitConfig(object):
                                                                                                self.load_custom_config_section(
                                                                                                    current_data,
                                                                                                    filenames_to_load_level[
-                                                                                                       "POST"])))
+                                                                                                       "POST"],
+                                                                                                   category="custom_post")))
                     else:
                         current_data_post = current_data
 
@@ -1737,15 +1784,16 @@ class AutosubmitConfig(object):
             del current_data_aux
         return current_data_pre, current_data_post
 
-    def load_custom_config_section(self, current_data, filenames_to_load) -> dict:
-        """Loads a section (PRE or POST ), simple str are also PRE data of the custom config files
+    def load_custom_config_section(self, current_data, filenames_to_load, category=None) -> dict:
+        """Loads a section (PRE or POST), simple str are also PRE data of the custom config files
 
         :param current_data: data until now
         :param filenames_to_load: files to load in this section
+        :param category: Provenance category ("custom_pre" or "custom_post")
         :return: unified configuration.
         """
         # This is a recursive call
-        current_data_pre, current_data_post = self.load_custom_config(current_data, filenames_to_load)
+        current_data_pre, current_data_post = self.load_custom_config(current_data, filenames_to_load, category=category)
         # Unifies all ``pre`` and ``post`` data.
         # Think of it as a tree with two branches that needs to be unified at each level
         return self.unify_conf(self.unify_conf(current_data_pre, current_data), current_data_post)
@@ -1843,10 +1891,10 @@ class AutosubmitConfig(object):
                 starter_conf.get("DEFAULT", {}).get("CUSTOM_CONFIG", None))
             if not only_experiment_data:
                 # Loads all configuration associated with the project data "pre"
-                custom_conf_pre = self.load_custom_config_section({}, filenames_to_load["PRE"])
+                custom_conf_pre = self.load_custom_config_section({}, filenames_to_load["PRE"], category="custom_pre")
                 # Loads all configuration associated with the user data "post"
                 self.experiment_data = self.load_custom_config_section(
-                    self.unify_conf(custom_conf_pre, non_minimal_conf), filenames_to_load["POST"])
+                    self.unify_conf(custom_conf_pre, non_minimal_conf), filenames_to_load["POST"], category="custom_post")
             else:
                 self.experiment_data = starter_conf
             ###
@@ -1952,7 +2000,7 @@ class AutosubmitConfig(object):
         self.substitute_dynamic_variables(target)
 
     def save(self) -> None:
-        """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file."""
+        """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file with provenance comments."""
         if self.is_current_logged_user_owner:
             if not self.metadata_folder.exists():
                 self.metadata_folder.mkdir(parents=True, exist_ok=True)
@@ -1963,10 +2011,10 @@ class AutosubmitConfig(object):
                             self.metadata_folder.joinpath("experiment_data.yml.bak"))
 
             try:
-                with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
-                    # Not using typ="safe" to preserve the readability of the file
-                    YAML().dump(self.experiment_data, stream)
-                self.metadata_folder.joinpath("experiment_data.yml").chmod(0o755)
+                # Use yaml-provenance dump_yaml to export with provenance comments
+                output_file = self.metadata_folder.joinpath("experiment_data.yml")
+                dump_yaml(self.experiment_data, output_file)
+                output_file.chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
                 if self.metadata_folder.joinpath("experiment_data.yml").exists():
@@ -2833,19 +2881,20 @@ class AutosubmitConfig(object):
                     os.chmod(f_name, 0o750)
 
     @staticmethod
-    def get_parser(parser_factory, file_path):
+    def get_parser(parser_factory, file_path, category=None):
         """Gets parser for given file.
 
         :param parser_factory:
         :param file_path: path to file to be parsed
         :type file_path: Path
+        :param category: Provenance category for this file (optional)
         :return: parser
         :rtype: YAMLParser
         """
         parser = parser_factory.create_parser()
         # For testing purposes
         if file_path == Path('/dummy/local/root/dir/a000/conf/') or file_path == Path('dummy/file/path'):
-            parser.data = parser.load(file_path)
+            parser.data = parser.load(file_path, category=category)
             if parser.data is None:
                 parser.data = {}
             return parser
@@ -2854,7 +2903,7 @@ class AutosubmitConfig(object):
 
         if file_path.match("*proj*"):
             if file_path.exists():
-                parser.data = parser.load(file_path)
+                parser.data = parser.load(file_path, category=category)
                 if parser.data is None:
                     parser.data = {}
             else:
@@ -2863,7 +2912,7 @@ class AutosubmitConfig(object):
             # This block may rise an exception but all its callers handle it
             try:
                 with open(file_path) as f:
-                    parser.data = parser.load(f)
+                    parser.data = parser.load(f, category=category)
                     if parser.data is None:
                         parser.data = {}
             except IOError:

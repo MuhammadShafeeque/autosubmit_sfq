@@ -41,6 +41,7 @@ from autosubmit.database.db_common import get_autosubmit_version, get_experiment
 from autosubmit.job.job import Job
 from autosubmit.job.job_common import Status
 from autosubmit.log.log import Log, AutosubmitCritical
+from yaml_provenance import get_provenance, DictWithProvenance
 
 """List of profiles used in our RO-Crate implementation, plus the one used
 as graph context."""
@@ -285,6 +286,57 @@ def _create_parameter(crate, parameter_name, parameter_value, formal_parameter, 
     return crate.add(ContextEntity(crate, properties=properties))
 
 
+def extract_provenance_summary(config_dict: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+    """Extract provenance information from a configuration dictionary.
+    
+    Recursively traverses a DictWithProvenance object and extracts source file,
+    line, column, and category information for each parameter.
+    
+    Args:
+        config_dict: The configuration dictionary (potentially DictWithProvenance)
+        prefix: The current parameter path prefix (used for recursion)
+    
+    Returns:
+        Dictionary mapping parameter paths to provenance info:
+        {
+            "EXPERIMENT.EXPID": {
+                "file": "/path/to/experiment.yml",
+                "line": 15,
+                "col": 10,
+                "category": "experiment"
+            },
+            ...
+        }
+    """
+    from yaml_provenance import get_provenance, DictWithProvenance
+    
+    provenance_map = {}
+    
+    if not isinstance(config_dict, dict):
+        return provenance_map
+    
+    for key, value in config_dict.items():
+        # Build the parameter path
+        param_path = f"{prefix}.{key}" if prefix else key
+        
+        # Try to get provenance for this value
+        prov = get_provenance(value)
+        if prov:
+            provenance_map[param_path] = {
+                "file": str(prov.file) if prov.file else "unknown",
+                "line": prov.line if hasattr(prov, 'line') else None,
+                "col": prov.col if hasattr(prov, 'col') else None,
+                "category": prov.category if hasattr(prov, 'category') else None
+            }
+        
+        # Recursively process nested dictionaries
+        if isinstance(value, dict):
+            nested_prov = extract_provenance_summary(value, param_path)
+            provenance_map.update(nested_prov)
+    
+    return provenance_map
+
+
 def create_rocrate_archive(
         as_conf: AutosubmitConfig,
         rocrate_json: dict[str, Any],
@@ -338,6 +390,29 @@ def create_rocrate_archive(
 
     # Add original YAML configuration.
     crate.add_dataset(source=Path(experiment_path, "conf"), dest_path="conf")
+
+    # Extract and save provenance information
+    Log.info('Extracting configuration provenance...')
+    provenance_summary = extract_provenance_summary(as_conf.experiment_data)
+    
+    # Save provenance summary to JSON file
+    provenance_file = experiment_path / "conf/metadata/provenance_summary.json"
+    provenance_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(provenance_file, 'w') as f:
+        json.dump(provenance_summary, f, indent=2)
+    
+    Log.info(f'Provenance summary written to {provenance_file}')
+    
+    # Add provenance summary to RO-Crate
+    crate.add_file(
+        source=provenance_file,
+        dest_path="conf/metadata/provenance_summary.json",
+        properties={
+            "name": "Configuration Provenance Summary",
+            "description": "Tracks the source file, line, and category for each configuration parameter",
+            "encodingFormat": "application/json"
+        }
+    )
 
     # Create workflow configuration (prospective provenance)
     main_entity = crate.add_workflow(

@@ -17,6 +17,7 @@
 
 
 from ruamel.yaml import YAML
+from yaml_provenance import load_yaml, ProvenanceConfig, configure
 
 
 class YAMLParserFactory:
@@ -31,4 +32,38 @@ class YAMLParser(YAML):
 
     def __init__(self):
         self.data = []
+        self.category = None
         super(YAMLParser, self).__init__(typ="safe")
+    
+    def load(self, stream, category=None):
+        """
+        Load YAML with provenance tracking.
+        
+        Parameters
+        ----------
+        stream : str, Path, or file-like object
+            The YAML file path or file object to load
+        category : str, optional
+            Category for provenance tracking
+            
+        Returns
+        -------
+        DictWithProvenance
+            The loaded data with provenance
+        """
+        # Store category for potential later use
+        if category is not None:
+            self.category = category
+        
+        # If stream is a file object, get its file path
+        if hasattr(stream, 'name'):
+            filepath = stream.name
+        else:
+            filepath = stream
+        
+        # Simple category resolver that uses the provided category
+        def category_resolver(path):
+            return (self.category, None)
+        
+        # Use yaml_provenance to load the file
+        return load_yaml(filepath, category_resolver=category_resolver if self.category else None)
