@@ -478,13 +478,13 @@ class AutosubmitConfig(object):
         """
         # Convert to DictWithProvenance if needed
         if not isinstance(unified_config, collections.abc.Mapping):
-            unified_config = DictWithProvenance()
+            unified_config = DictWithProvenance({}, {})
         elif not isinstance(unified_config, DictWithProvenance) and isinstance(unified_config, dict):
-            unified_config = DictWithProvenance(unified_config)
+            unified_config = DictWithProvenance(unified_config, {})
         
         # If new_dict is a plain dict, convert it (though it should already be DictWithProvenance from load)
         if isinstance(new_dict, dict) and not isinstance(new_dict, DictWithProvenance):
-            new_dict = DictWithProvenance(new_dict)
+            new_dict = DictWithProvenance(new_dict, {})
         
         # Initialize keys from new_dict in unified_config
         for key in new_dict.keys():
@@ -495,7 +495,7 @@ class AutosubmitConfig(object):
         for key, val in new_dict.items():
             if isinstance(val, collections.abc.Mapping):
                 # Recursive merge for nested dicts
-                tmp = self.deep_update(unified_config.get(key, DictWithProvenance()), val)
+                tmp = self.deep_update(unified_config.get(key, DictWithProvenance({}, {})), val)
                 unified_config[key] = tmp
             elif isinstance(val, list):
                 if len(val) > 0 and isinstance(val[0], collections.abc.Mapping):
