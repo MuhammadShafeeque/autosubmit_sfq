@@ -35,7 +35,7 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
-from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, dump_yaml
+from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, dump_yaml, clean_provenance
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -2128,7 +2128,7 @@ class AutosubmitConfig(object):
                 else:
                     parameters_dict[new_key] = val
 
-        return parameters_dict
+        return clean_provenance(parameters_dict)
 
     def load_parameters(self):
         """Load all experiment data
