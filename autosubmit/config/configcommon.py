@@ -2105,7 +2105,26 @@ class AutosubmitConfig(object):
             try:
                 # Use yaml-provenance dump_yaml to export with provenance comments
                 output_file = self.metadata_folder.joinpath("experiment_data.yml")
+                
+                # Debug: Check experiment_data type and provenance map
+                import sys
+                print(f"\n[DEBUG-SAVE] About to call dump_yaml", file=sys.stderr, flush=True)
+                print(f"[DEBUG-SAVE] experiment_data type: {type(self.experiment_data).__name__}", file=sys.stderr, flush=True)
+                print(f"[DEBUG-SAVE] Is DictWithProvenance: {type(self.experiment_data).__name__ == 'DictWithProvenance'}", file=sys.stderr, flush=True)
+                if hasattr(self.experiment_data, '_provenance_map'):
+                    print(f"[DEBUG-SAVE] Has _provenance_map: True, size: {len(self.experiment_data._provenance_map)}", file=sys.stderr, flush=True)
+                    if self.experiment_data._provenance_map:
+                        sample_keys = list(self.experiment_data._provenance_map.keys())[:5]
+                        print(f"[DEBUG-SAVE] Sample _provenance_map keys: {sample_keys}", file=sys.stderr, flush=True)
+                        # Show first key's provenance in detail
+                        first_key = sample_keys[0]
+                        first_prov = self.experiment_data._provenance_map[first_key]
+                        print(f"[DEBUG-SAVE] Example provenance for '{first_key}': {first_prov}", file=sys.stderr, flush=True)
+                else:
+                    print(f"[DEBUG-SAVE] Has _provenance_map: False", file=sys.stderr, flush=True)
+                
                 dump_yaml(self.experiment_data, filepath=str(output_file))
+                print(f"[DEBUG-SAVE] dump_yaml completed successfully\n", file=sys.stderr, flush=True)
                 output_file.chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
