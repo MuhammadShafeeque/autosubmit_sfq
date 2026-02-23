@@ -35,7 +35,7 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
-from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, dump_yaml, clean_provenance
+from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, ListWithProvenance, dump_yaml, clean_provenance
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -448,20 +448,31 @@ class AutosubmitConfig(object):
         If a value is a dictionary, it calls itself recursively to normalize the nested dictionary.
         If a value is a list, it iterates through the list and normalizes any dictionaries keys within it.
         Other types of values are added to the normalized dictionary as is.
+        
+        Provenance tracking is preserved if the input data is a DictWithProvenance or ListWithProvenance.
 
         :param data: The dictionary to normalize.
         :type data: dict[str, Any]
         :return: A new dictionary with all keys normalized to uppercase.
         :rtype: dict[str, Any]
         """
-        normalized_data = dict()
+        # Preserve DictWithProvenance type if input has it
+        if isinstance(data, DictWithProvenance):
+            normalized_data = DictWithProvenance({}, {})
+        else:
+            normalized_data = dict()
+            
         with suppress(Exception):
             for key, val in data.items():
                 normalized_key = str(key).upper()
                 if isinstance(val, collections.abc.Mapping):
                     normalized_data[normalized_key] = self.deep_normalize(val)
                 elif isinstance(val, list):
-                    normalized_list = []
+                    # Preserve ListWithProvenance type if input list has it
+                    if isinstance(val, ListWithProvenance):
+                        normalized_list = ListWithProvenance([], [])
+                    else:
+                        normalized_list = []
                     for item in val:
                         if isinstance(item, collections.abc.Mapping):
                             normalized_list.append(self.deep_normalize(item))
@@ -758,8 +769,9 @@ class AutosubmitConfig(object):
             category = self._determine_category(yaml_file)
 
         new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file, category=category)
-        new_file.data = self.normalize_variables(new_file.data.copy(),
-                                                 must_exists=False)  # TODO Figure out why this .copy is needed
+        # No need to .copy() since parser.load() returns fresh data and normalize_variables creates a new dict
+        new_file.data = self.normalize_variables(new_file.data,
+                                                 must_exists=False)
         if new_file.data.get("DEFAULT", {}).get("CUSTOM_CONFIG", None) is not None:
             new_file.data["DEFAULT"]["CUSTOM_CONFIG"] = self.convert_list_to_string(
                 new_file.data["DEFAULT"]["CUSTOM_CONFIG"])
@@ -2911,10 +2923,10 @@ class AutosubmitConfig(object):
         else:
             # This block may rise an exception but all its callers handle it
             try:
-                with open(file_path) as f:
-                    parser.data = parser.load(f, category=category)
-                    if parser.data is None:
-                        parser.data = {}
+                # Pass file_path directly to parser.load so yaml_provenance can track line/column positions
+                parser.data = parser.load(file_path, category=category)
+                if parser.data is None:
+                    parser.data = {}
             except IOError:
                 parser.data = {}
                 return parser
