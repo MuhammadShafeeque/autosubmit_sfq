@@ -1415,7 +1415,7 @@ class Job(object):
     @staticmethod
     def parse_time(wallclock):
         # TODO This is a workaround for the time being, just defined for tests passing without more issues
-        if type(wallclock) is not str:
+        if not isinstance(wallclock, str):
             return datetime.timedelta(24 * 60 * 60)
         regex = re.compile(r'(((?P<hours>\d+):)((?P<minutes>\d+)))(:(?P<seconds>\d+))?')
         parts = regex.match(wallclock)
@@ -1617,11 +1617,11 @@ class Job(object):
 
     def process_scheduler_parameters(self, job_platform: 'Platform', chunk: int) -> None:
         """Parsers yaml data stored in the dictionary and calculates the components of the heterogeneous job if any."""
-        if type(self.processors) is list:
+        if isinstance(self.processors, list):
             hetsize = (len(self.processors))
         else:
             hetsize = 1
-        if type(self.nodes) is list:
+        if isinstance(self.nodes, list):
             hetsize = max(hetsize, len(self.nodes))
         self.het['HETSIZE'] = hetsize
         self.het['PROCESSORS'] = list()
@@ -1638,7 +1638,7 @@ class Job(object):
         self.het['PARTITION'] = list()
         self.het['CURRENT_PROJ'] = list()
         self.het['CUSTOM_DIRECTIVES'] = list()
-        if type(self.processors) is list:
+        if isinstance(self.processors, list):
             self.het['PROCESSORS'] = list()
             for x in self.processors:
                 self.het['PROCESSORS'].append(str(x))
@@ -1646,7 +1646,7 @@ class Job(object):
             self.processors = str(sum([int(x) for x in self.processors]))
         else:
             self.processors = str(self.processors)
-        if type(self.nodes) is list:
+        if isinstance(self.nodes, list):
             # add it to heap dict as it were originally
             self.het['NODES'] = list()
             for x in self.nodes:
@@ -1655,7 +1655,7 @@ class Job(object):
             self.nodes = str(sum([int(x) for x in self.nodes]))
         else:
             self.nodes = str(self.nodes)
-        if type(self.threads) is list:
+        if isinstance(self.threads, list):
             # Get the max threads, each element can be a str or int
             self.het['NUMTHREADS'] = list()
             if len(self.threads) == 1:
@@ -1671,7 +1671,7 @@ class Job(object):
 
         else:
             self.threads = str(self.threads)
-        if type(self.tasks) is list:
+        if isinstance(self.tasks, list):
             # Get the max tasks, each element can be a str or int
             self.het['TASKS'] = list()
             if len(self.tasks) == 1:
@@ -1697,7 +1697,7 @@ class Job(object):
                 self.tasks = job_platform.processors_per_node
             self.tasks = str(self.tasks)
 
-        if type(self.memory) is list:
+        if isinstance(self.memory, list):
             # Get the max memory, each element can be a str or int
             self.het['MEMORY'] = list()
             if len(self.memory) == 1:
@@ -1709,7 +1709,7 @@ class Job(object):
             self.memory = str(max([int(x) for x in self.memory]))
         else:
             self.memory = str(self.memory)
-        if type(self.memory_per_task) is list:
+        if isinstance(self.memory_per_task, list):
             # Get the max memory per task, each element can be a str or int
             self.het['MEMORY_PER_TASK'] = list()
             if len(self.memory_per_task) == 1:
@@ -1723,7 +1723,7 @@ class Job(object):
 
         else:
             self.memory_per_task = str(self.memory_per_task)
-        if type(self.reservation) is list:
+        if isinstance(self.reservation, list):
             # Get the reservation name, each element can be a str
             self.het['RESERVATION'] = list()
             if len(self.reservation) == 1:
@@ -1735,7 +1735,7 @@ class Job(object):
             self.reservation = str(self.het['RESERVATION'][0])
         else:
             self.reservation = str(self.reservation)
-        if type(self.exclusive) is list:
+        if isinstance(self.exclusive, list):
             # Get the exclusive, each element can be only be bool
             self.het['EXCLUSIVE'] = list()
             if len(self.exclusive) == 1:
@@ -1747,7 +1747,7 @@ class Job(object):
             self.exclusive = self.het['EXCLUSIVE'][0]
         else:
             self.exclusive = self.exclusive
-        if type(self.hyperthreading) is list:
+        if isinstance(self.hyperthreading, list):
             # Get the hyperthreading, each element can be only be bool
             self.het['HYPERTHREADING'] = list()
             if len(self.hyperthreading) == 1:
@@ -1759,7 +1759,7 @@ class Job(object):
             self.exclusive = self.het['HYPERTHREADING'][0]
         else:
             self.hyperthreading = self.hyperthreading
-        if type(self.executable) is list:
+        if isinstance(self.executable, list):
             # Get the executable, each element can be only be bool
             self.het['EXECUTABLE'] = list()
             if len(self.executable) == 1:
@@ -1771,7 +1771,7 @@ class Job(object):
             self.executable = str(self.het['EXECUTABLE'][0])
         else:
             self.executable = self.executable
-        if type(self.queue) is list:
+        if isinstance(self.queue, list):
             # Get the queue, each element can be only be bool
             self.het['CURRENT_QUEUE'] = list()
             if len(self.queue) == 1:
@@ -1783,7 +1783,7 @@ class Job(object):
             self.queue = self.het['CURRENT_QUEUE'][0]
         else:
             self.queue = self.queue
-        if type(self.partition) is list:
+        if isinstance(self.partition, list):
             # Get the partition, each element can be only be bool
             self.het['PARTITION'] = list()
             if len(self.partition) == 1:
@@ -1797,13 +1797,13 @@ class Job(object):
             self.partition = self.partition
 
         self.het['CUSTOM_DIRECTIVES'] = list()
-        if type(self.custom_directives) is list:
+        if isinstance(self.custom_directives, list):
             self.custom_directives = json.dumps(self.custom_directives)
         self.custom_directives = self.custom_directives.replace("\'", "\"").strip("[]").strip(", ")
         if self.custom_directives == '':
             if job_platform.custom_directives is None:
                 job_platform.custom_directives = ''
-            if type(job_platform.custom_directives) is list:
+            if isinstance(job_platform.custom_directives, list):
                 self.custom_directives = json.dumps(job_platform.custom_directives)
                 self.custom_directives = self.custom_directives.replace("\'", "\"").strip("[]").strip(", ")
             else:
@@ -1822,7 +1822,7 @@ class Job(object):
                     self.het['CUSTOM_DIRECTIVES'].append(json.loads(custom_directive))
                 self.custom_directives = self.het['CUSTOM_DIRECTIVES'][0]
             else:
-                if type(self.custom_directives) is str:  # TODO This is a workaround for the time being, just defined for tests passing without more issues
+                if isinstance(self.custom_directives, str):  # TODO This is a workaround for the time being, just defined for tests passing without more issues
                     try:
                         self.custom_directives = json.loads(self.custom_directives)
                     except (ValueError, TypeError) as e:
@@ -1934,7 +1934,7 @@ class Job(object):
             parameters['WRAPPER' + "_EXTENSIBLE"] = as_conf.get_extensible_wallclock()
 
         for wrapper_section, wrapper_val in wrappers.items():
-            if type(wrapper_val) is not dict:
+            if not isinstance(wrapper_val, dict):
                 continue
             parameters[wrapper_section] = as_conf.get_wrapper_type(
                 clean_provenance(as_conf.experiment_data["WRAPPERS"].get(wrapper_section)))
@@ -1953,7 +1953,7 @@ class Job(object):
                                                                     clean_provenance(as_conf.experiment_data.get("CONFIG", {})).get(
                                                                         "RETRIALS", 0))
         for wrapper_data in (wrapper for wrapper in clean_provenance(as_conf.experiment_data.get("WRAPPERS", {})).values() if
-                             type(wrapper) is dict):
+                             isinstance(wrapper, dict)):
             jobs_in_wrapper = wrapper_data.get("JOBS_IN_WRAPPER", [])
             if self.section.upper() in jobs_in_wrapper:
                 self.retrials = wrapper_data.get("RETRIALS", self.retrials)
@@ -2711,7 +2711,7 @@ class Job(object):
                                                     job_id=self.id, out_file=out, err_file=err)
 
         # Launch second as threaded function only for slurm
-        if job_data_dc and type(self.platform) is not str and self.platform.type == "slurm":
+        if job_data_dc and not isinstance(self.platform, str) and self.platform.type == "slurm":
             thread_write_finish = Thread(target=ExperimentHistory(self.expid, jobdata_dir_path=BasicConfig.JOBDATA_DIR,
                                                                   historiclog_dir_path=BasicConfig.HISTORICAL_LOG_DIR).write_platform_data_after_finish,
                                          args=(job_data_dc, self.platform))

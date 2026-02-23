@@ -1803,12 +1803,12 @@ class AutosubmitConfig(object):
         :param parameter:
         :return: list
         """
-        if type(self.starter_conf[parameter]) is str:
+        if isinstance(self.starter_conf[parameter], str):
             if "," in self.starter_conf[parameter]:
                 list_parameters = self.starter_conf[parameter].split(",")
             else:
                 list_parameters = [self.starter_conf[parameter]]
-        elif type(self.starter_conf[parameter]) is list:
+        elif isinstance(self.starter_conf[parameter], list):
             list_parameters = self.starter_conf[parameter]
         else:
             list_parameters = list(self.starter_conf[parameter])
@@ -2013,7 +2013,7 @@ class AutosubmitConfig(object):
             try:
                 # Use yaml-provenance dump_yaml to export with provenance comments
                 output_file = self.metadata_folder.joinpath("experiment_data.yml")
-                dump_yaml(self.experiment_data, output_file)
+                dump_yaml(self.experiment_data, filepath=str(output_file))
                 output_file.chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
@@ -2041,7 +2041,7 @@ class AutosubmitConfig(object):
                 if key not in last_run_data.keys():
                     differences[key] = val
                 else:
-                    if type(last_run_data[key]) is not dict:
+                    if not isinstance(last_run_data[key], dict):
                         differences[key] = val
                     elif len(last_run_data[key]) == 0 and len(last_run_data[key]) == len(current_data[key]):
                         continue
@@ -2059,7 +2059,7 @@ class AutosubmitConfig(object):
                 if key not in current_data.keys():
                     differences[key] = val
                 else:
-                    if type(current_data[key]) is dict and len(current_data[key]) == 0:
+                    if isinstance(current_data[key], dict) and len(current_data[key]) == 0:
                         diff = self.detailed_deep_diff(current_data[key], val, level)
                         if diff:
                             differences[key] = diff
@@ -2349,7 +2349,7 @@ class AutosubmitConfig(object):
             split_string = nestedExpr('[', ']').parseString(string).asList()
             string_date = None
             for split in split_string[0]:
-                if type(split) is list:
+                if isinstance(split, list):
                     for split_in in split:
                         if split_in.find("-") != -1:
                             split_numbers = split_in.split("-")
@@ -2424,7 +2424,7 @@ class AutosubmitConfig(object):
         split_string = nestedExpr('[', ']').parseString(string).asList()
         string_member = None
         for split in split_string[0]:
-            if type(split) is list:
+            if isinstance(split, list):
                 for split_in in split:
                     if split_in.find("-") != -1:
                         split_numbers = split_in.split("-")
