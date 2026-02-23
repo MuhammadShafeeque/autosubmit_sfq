@@ -456,37 +456,71 @@ class AutosubmitConfig(object):
         :return: A new dictionary with all keys normalized to uppercase.
         :rtype: dict[str, Any]
         """
-        # Preserve DictWithProvenance type if input has it
+        # Preserve DictWithProvenance type by extracting and mapping provenance
         if isinstance(data, DictWithProvenance):
-            normalized_data = DictWithProvenance({}, {})
-        else:
-            normalized_data = dict()
+            # Extract provenance structure from source
+            source_provenance = data.get_provenance()
+            normalized_dict = {}
+            normalized_prov = {}
             
-        try:
+            for key, val in data.items():
+                normalized_key = str(key).upper()
+                
+                if isinstance(val, collections.abc.Mapping):
+                    normalized_dict[normalized_key] = self.deep_normalize(val)
+                elif isinstance(val, list):
+                    normalized_dict[normalized_key] = self._deep_normalize_list(val)
+                else:
+                    # Keep the value as-is (may be a wrapped type with provenance)
+                    normalized_dict[normalized_key] = val
+                
+                # Map provenance from old key to new uppercase key
+                if key in source_provenance:
+                    normalized_prov[normalized_key] = source_provenance[key]
+            
+            # Create DictWithProvenance with BOTH normalized data AND provenance
+            return DictWithProvenance(normalized_dict, normalized_prov, config=data._config)
+        else:
+            # Plain dict - no provenance to preserve
+            normalized_data = dict()
             for key, val in data.items():
                 normalized_key = str(key).upper()
                 if isinstance(val, collections.abc.Mapping):
                     normalized_data[normalized_key] = self.deep_normalize(val)
                 elif isinstance(val, list):
-                    # Preserve ListWithProvenance type if input list has it
-                    if isinstance(val, ListWithProvenance):
-                        normalized_list = ListWithProvenance([], [])
-                    else:
-                        normalized_list = []
-                    for item in val:
-                        if isinstance(item, collections.abc.Mapping):
-                            normalized_list.append(self.deep_normalize(item))
-                        else:
-                            normalized_list.append(item)
-                    normalized_data[normalized_key] = normalized_list
+                    normalized_data[normalized_key] = self._deep_normalize_list(val)
                 else:
                     normalized_data[normalized_key] = val
-        except Exception as e:
-            # Log the exception but don't fail - some config values may not be iterable
-            Log.debug(f"Exception during deep_normalize: {type(e).__name__}: {str(e)}")
-            # If iteration fails completely, return what we have so far
-            pass
-        return normalized_data
+            return normalized_data
+    
+    def _deep_normalize_list(self, lst: list) -> list:
+        """Helper to normalize lists while preserving ListWithProvenance."""
+        if isinstance(lst, ListWithProvenance):
+            # Extract provenance from source list
+            source_provenance = lst.get_provenance()
+            normalized_list_data = []
+            normalized_list_prov = []
+            
+            for i, item in enumerate(lst):
+                if isinstance(item, collections.abc.Mapping):
+                    normalized_list_data.append(self.deep_normalize(item))
+                else:
+                    normalized_list_data.append(item)
+                
+                # Map provenance for this index
+                if i < len(source_provenance):
+                    normalized_list_prov.append(source_provenance[i])
+            
+            return ListWithProvenance(normalized_list_data, normalized_list_prov, config=lst._config)
+        else:
+            # Plain list
+            normalized_list = []
+            for item in lst:
+                if isinstance(item, collections.abc.Mapping):
+                    normalized_list.append(self.deep_normalize(item))
+                else:
+                    normalized_list.append(item)
+            return normalized_list
 
     def deep_update(self, unified_config, new_dict):
         """Update a nested dictionary or similar mapping, preserving provenance.
