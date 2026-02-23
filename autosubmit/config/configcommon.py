@@ -545,7 +545,8 @@ class AutosubmitConfig(object):
         for key, val in new_dict.items():
             if isinstance(val, collections.abc.Mapping):
                 # Recursive merge for nested dicts
-                tmp = self.deep_update(unified_config.get(key, DictWithProvenance({}, {})), val)
+                # Use plain {} as default - deep_update will convert it to DictWithProvenance
+                tmp = self.deep_update(unified_config.get(key, {}), val)
                 unified_config[key] = tmp
             elif isinstance(val, list):
                 if len(val) > 0 and isinstance(val[0], collections.abc.Mapping):
