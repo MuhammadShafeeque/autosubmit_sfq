@@ -55,11 +55,14 @@ class YAMLParser(YAML):
         if category is not None:
             self.category = category
         
-        # If stream is a file object, get its file path
-        if hasattr(stream, 'name'):
+        # If stream is a file-like object, get its file path
+        # Use 'read' attribute to distinguish file objects from Path objects
+        # (Path objects have .name but it only returns the filename, not the full path)
+        if hasattr(stream, 'read'):
             filepath = stream.name
         else:
-            filepath = stream
+            # Ensure Path objects are converted to strings for yaml_provenance
+            filepath = str(stream)
         
         # Simple category resolver that uses the provided category
         def category_resolver(path):

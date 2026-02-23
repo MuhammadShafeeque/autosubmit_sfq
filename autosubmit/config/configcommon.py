@@ -462,7 +462,7 @@ class AutosubmitConfig(object):
         else:
             normalized_data = dict()
             
-        with suppress(Exception):
+        try:
             for key, val in data.items():
                 normalized_key = str(key).upper()
                 if isinstance(val, collections.abc.Mapping):
@@ -481,6 +481,11 @@ class AutosubmitConfig(object):
                     normalized_data[normalized_key] = normalized_list
                 else:
                     normalized_data[normalized_key] = val
+        except Exception as e:
+            # Log the exception but don't fail - some config values may not be iterable
+            Log.debug(f"Exception during deep_normalize: {type(e).__name__}: {str(e)}")
+            # If iteration fails completely, return what we have so far
+            pass
         return normalized_data
 
     def deep_update(self, unified_config, new_dict):
@@ -2927,7 +2932,8 @@ class AutosubmitConfig(object):
                 parser.data = parser.load(file_path, category=category)
                 if parser.data is None:
                     parser.data = {}
-            except IOError:
+            except IOError as e:
+                Log.debug(f"Failed to load config file {file_path}: {str(e)}")
                 parser.data = {}
                 return parser
             except Exception as exp:
