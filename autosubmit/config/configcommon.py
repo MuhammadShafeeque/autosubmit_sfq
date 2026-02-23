@@ -151,6 +151,46 @@ class AutosubmitConfig(object):
                         f"into the historical database: {str(e)}")
             return ""
 
+    def save(self, filepath: str) -> None:
+        """
+        Save experiment_data to YAML file with provenance comments.
+        
+        This method logs debug information about the provenance state before dumping.
+        
+        :param filepath: Path to output YAML file
+        :type filepath: str
+        """
+        # Log provenance state before dumping
+        Log.info(f"[TRACE] save(): Preparing to dump experiment_data")
+        Log.info(f"[TRACE]   Type of self.experiment_data: {type(self.experiment_data).__name__}")
+        Log.info(f"[TRACE]   Is DictWithProvenance: {isinstance(self.experiment_data, DictWithProvenance)}")
+        
+        if hasattr(self.experiment_data, '_provenance_map'):
+            Log.info(f"[TRACE]   Has _provenance_map: True")
+            Log.info(f"[TRACE]   Size of _provenance_map: {len(self.experiment_data._provenance_map)}")
+            
+            # Show a few example keys from _provenance_map
+            if self.experiment_data._provenance_map:
+                sample_keys = list(self.experiment_data._provenance_map.keys())[:5]
+                Log.info(f"[TRACE]   Sample keys in _provenance_map: {sample_keys}")
+                
+                # Show details of first key
+                if sample_keys:
+                    first_key = sample_keys[0]
+                    prov_entry = self.experiment_data._provenance_map[first_key]
+                    Log.info(f"[TRACE]   Example entry for key '{first_key}':")
+                    Log.info(f"[TRACE]     Type: {type(prov_entry).__name__}")
+                    if isinstance(prov_entry, dict) and 'yaml_file' in prov_entry:
+                        Log.info(f"[TRACE]     yaml_file: {prov_entry.get('yaml_file')}")
+                        Log.info(f"[TRACE]     line: {prov_entry.get('line')}")
+        else:
+            Log.info(f"[TRACE]   Has _provenance_map: False")
+        
+        # Now call dump_yaml
+        Log.info(f"[TRACE] save(): Calling dump_yaml to write to {filepath}")
+        dump_yaml(self.experiment_data, filepath=filepath)
+        Log.info(f"[TRACE] save(): dump_yaml completed")
+
     def get_project_dir(self) -> str:
         """Returns experiment's project destination directory.
 
