@@ -516,6 +516,100 @@ class AutosubmitConfig(object):
             else:
                 normalized_list.append(item)
         return normalized_list
+    
+    def _reindex_provenance_after_loading(self):
+        """Re-index provenance entries after all configuration loading.
+        
+        After deep_update, normalization, and merging, parameters may be tracked
+        with shorter paths (e.g., "MARENOSTRUM5.HOST") but need to be accessible
+        by their full paths in experiment_data (e.g., "PLATFORMS.MARENOSTRUM5.HOST").
+        
+        This method walks experiment_data and ensures all parameters are properly
+        indexed in the provenance tracker with their final key paths.
+        """
+        if not hasattr(self, 'provenance_tracker'):
+            return
+        
+        def walk_and_reindex(data, path=""):
+            """Recursively walk data structure and re-index provenance."""
+            if not isinstance(data, dict):
+                return
+            
+            for key, value in data.items():
+                current_path = f"{path}.{key}" if path else key
+                
+                if isinstance(value, dict):
+                    # Recursively handle nested dicts
+                    walk_and_reindex(value, current_path)
+                elif isinstance(value, list):
+                    # Skip lists - provenance is tracked for the list itself, not items
+                    pass
+                elif value != "":
+                    # Scalar value: check if provenance exists at current path
+                    prov_entry = self.provenance_tracker.get(current_path)
+                    
+                    if prov_entry is None:
+                        # Try to find provenance at shorter paths
+                        # E.g., if current_path is "PLATFORMS.MARENOSTRUM5.HOST",
+                        # try "MARENOSTRUM5.HOST", then "HOST"
+                        path_parts = current_path.split(".")
+                        for i in range(1, len(path_parts)):
+                            shorter_path = ".".join(path_parts[i:])
+                            prov_entry = self.provenance_tracker.get(shorter_path)
+                            if prov_entry:
+                                # Found provenance at shorter path, re-register at full path
+                                self.provenance_tracker.track(
+                                    current_path,
+                                    value,
+                                    prov_entry.file,
+                                    prov_entry.line,
+                                    prov_entry.col
+                                )
+                                break
+        
+        # Walk the entire experiment_data structure
+        walk_and_reindex(self.experiment_data)
+    
+    def _retrack_after_merge(self, data, prefix="", source_data=None):
+        """Re-track provenance after dictionary merging.
+        
+        When deep_update() merges dictionaries, it creates NEW dict objects
+        without preserving provenance. This method walks the merged structure
+        and re-registers provenance from the source data.
+        
+        :param data: The merged dictionary to re-track
+        :param prefix: Current key path prefix (e.g., "PLATFORMS.MARENOSTRUM5")
+        :param source_data: Original source data to query for provenance
+        """
+        if not hasattr(self, 'provenance_tracker'):
+            return
+        
+        if source_data is None:
+            source_data = data
+        
+        for key, value in data.items():
+            # Build the full key path
+            current_path = f"{prefix}.{key}" if prefix else key
+            
+            # Try to find provenance for this parameter in the tracker
+            prov_entry = self.provenance_tracker.get(current_path)
+            
+            if prov_entry is None:
+                # Try without prefix (might be tracked from original file)
+                prov_entry = self.provenance_tracker.get(key)
+            
+            if isinstance(value, dict):
+                # Recursively re-track nested dictionaries
+                self._retrack_after_merge(value, current_path, source_data)
+            elif not isinstance(value, (dict, list)) and value != "" and prov_entry:
+                # Re-track scalar values that had provenance
+                self.provenance_tracker.track(
+                    current_path,
+                    value,
+                    prov_entry.file,
+                    prov_entry.line,
+                    prov_entry.col
+                )
 
     def deep_update(self, unified_config, new_dict):
         """Update a nested dictionary or similar mapping.
@@ -537,6 +631,25 @@ class AutosubmitConfig(object):
                 # Recursive merge for nested dicts
                 tmp = self.deep_update(unified_config.get(key, {}), val)
                 unified_config[key] = tmp
+                
+                # CRITICAL FIX: Re-track provenance after merge
+                # Query tracker for provenance from new_dict and re-register
+                # under the merged structure's key paths
+                for nested_key, nested_val in tmp.items():
+                    if not isinstance(nested_val, (dict, list)):
+                        # Try to find provenance from new_dict
+                        source_path = f"{key}.{nested_key}"
+                        prov_entry = self.provenance_tracker.get(source_path)
+                        if prov_entry and hasattr(self, 'provenance_tracker'):
+                            # Re-track under the unified_config path
+                            target_path = f"{key}.{nested_key}"
+                            self.provenance_tracker.track(
+                                target_path,
+                                nested_val,
+                                prov_entry.file,
+                                prov_entry.line,
+                                prov_entry.col
+                            )
             elif isinstance(val, list):
                 if len(val) > 0 and isinstance(val[0], collections.abc.Mapping):
                     unified_config[key] = val
@@ -547,6 +660,18 @@ class AutosubmitConfig(object):
             else:
                 # For scalar values
                 unified_config[key] = new_dict[key]
+                
+                # CRITICAL FIX: Preserve provenance for scalar values
+                prov_entry = self.provenance_tracker.get(key)
+                if prov_entry and hasattr(self, 'provenance_tracker'):
+                    # Re-track scalar value to ensure provenance is preserved
+                    self.provenance_tracker.track(
+                        key,
+                        new_dict[key],
+                        prov_entry.file,
+                        prov_entry.line,
+                        prov_entry.col
+                    )
         
         return unified_config
 
@@ -2009,6 +2134,15 @@ class AutosubmitConfig(object):
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
             self._add_autosubmit_dict()
+            
+            # CRITICAL FIX: Re-index provenance after all transformations
+            # After deep_update, normalization, and variable substitution, some
+            # parameters may have lost their provenance tracking. Walk the entire
+            # experiment_data structure and ensure all tracked parameters are
+            # accessible by their final key paths.
+            if hasattr(self, 'provenance_tracker'):
+                self._reindex_provenance_after_loading()
+            
             self.misc_data = {}
             self.misc_files = list(set(self.misc_files))
             for filename in self.misc_files:
