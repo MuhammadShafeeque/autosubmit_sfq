@@ -45,7 +45,7 @@ class YAMLParser(YAML):
         stream : str, Path, or file-like object
             The YAML file path or file object to load
         category : str, optional
-            Category for provenance tracking (currently unused in tracker API)
+            Category for provenance tracking (e.g., 'base', 'model', 'environment')
             
         Returns
         -------
@@ -66,7 +66,8 @@ class YAMLParser(YAML):
             filepath = str(stream)
         
         # Use tracker-based API: load_yaml_with_tracking returns (data, tracker)
-        data, tracker = load_yaml_with_tracking(filepath)
+        # Pass category to tracking
+        data, tracker = load_yaml_with_tracking(filepath, category=category)
         
         # Store tracker for later access by configcommon.py
         self.tracker = tracker

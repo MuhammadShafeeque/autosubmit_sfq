@@ -1939,7 +1939,8 @@ class AutosubmitConfig(object):
                         self.provenance_tracker,
                         key,
                         value,
-                        f"<environment:{key}>"
+                        f"<environment:{key}>",
+                        category="environment"
                     )
             
             starter_conf = self.load_common_parameters(starter_conf)
@@ -1981,13 +1982,15 @@ class AutosubmitConfig(object):
                 self.provenance_tracker,
                 "ROOTDIR",
                 self.experiment_data['ROOTDIR'],
-                "computed:LOCAL_ROOT_DIR/EXPID"
+                "computed:LOCAL_ROOT_DIR/EXPID",
+                category="computed"
             )
             track_computed_parameter(
                 self.provenance_tracker,
                 "PROJDIR",
                 self.experiment_data['PROJDIR'],
-                "computed:PROJECT_DESTINATION"
+                "computed:PROJECT_DESTINATION",
+                category="computed"
             )
             
             # Load BasicConfig properties and track them
@@ -1999,7 +2002,8 @@ class AutosubmitConfig(object):
                     self.provenance_tracker,
                     key,
                     value,
-                    f"<system:BasicConfig.{key}>"
+                    f"<system:BasicConfig.{key}>",
+                    category="system"
                 )
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
@@ -2079,7 +2083,8 @@ class AutosubmitConfig(object):
                 self.provenance_tracker,
                 f"HPC{name}",
                 value,
-                f"derived:PLATFORMS.{hpcarch}.{name}"
+                f"derived:PLATFORMS.{hpcarch}.{name}",
+                category="derived"
             )
 
         # HPCARCH itself
@@ -2088,7 +2093,8 @@ class AutosubmitConfig(object):
             self.provenance_tracker,
             "HPCARCH",
             hpcarch,
-            "derived:DEFAULT.HPCARCH"
+            "derived:DEFAULT.HPCARCH",
+            category="derived"
         )
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
@@ -2105,7 +2111,8 @@ class AutosubmitConfig(object):
                 self.provenance_tracker,
                 "HPCROOTDIR",
                 str(rootdir_path),
-                f"computed:{scratch}/{project}/{user}/{self.expid}"
+                f"computed:{scratch}/{project}/{user}/{self.expid}",
+                category="computed"
             )
             
             target["HPCLOGDIR"] = str(logdir_path)
@@ -2113,7 +2120,8 @@ class AutosubmitConfig(object):
                 self.provenance_tracker,
                 "HPCLOGDIR",
                 str(logdir_path),
-                f"computed:HPCROOTDIR/LOG_{self.expid}"
+                f"computed:HPCROOTDIR/LOG_{self.expid}",
+                category="computed"
             )
         # Default local paths.
         elif hpcarch.upper() == "LOCAL":
@@ -2125,7 +2133,8 @@ class AutosubmitConfig(object):
                 self.provenance_tracker,
                 "HPCROOTDIR",
                 str(rootdir_path),
-                "computed:LOCAL_ROOT_DIR/EXPID/LOCAL_TMP_DIR"
+                "computed:LOCAL_ROOT_DIR/EXPID/LOCAL_TMP_DIR",
+                category="computed"
             )
             
             target["HPCLOGDIR"] = str(logdir_path)
@@ -2133,7 +2142,8 @@ class AutosubmitConfig(object):
                 self.provenance_tracker,
                 "HPCLOGDIR",
                 str(logdir_path),
-                "computed:HPCROOTDIR/LOG_EXPID"
+                "computed:HPCROOTDIR/LOG_EXPID",
+                category="computed"
             )
 
         self.substitute_dynamic_variables(target)
@@ -2148,23 +2158,35 @@ class AutosubmitConfig(object):
         yaml_file = prov.get("yaml_file", "<unknown>")
         line = prov.get("line")
         col = prov.get("col")
+        category = prov.get("category")
         hierarchical_path = prov.get("hierarchical_path", "")
         operation = prov.get("operation", "")
         
         # Format based on available info
+        parts = [f"Source: {yaml_file}"]
+        
         if line is not None and col is not None:
-            # Full provenance: file, line, col, path
-            return f"# Source: {yaml_file} line:{line},col:{col} [{hierarchical_path}]"
-        elif operation == "computed":
-            # Computed value
-            return f"# Computed: {yaml_file}"
+            # Full provenance: file, line, col
+            parts.append(f"line:{line},col:{col}")
+        elif line is not None:
+            parts.append(f"line:{line}")
+        
+        if category:
+            parts.append(f"category:{category}")
+        
+        if operation == "computed":
+            # Mark as computed
+            parts.append("(computed)")
         elif operation == "copied_as_HPC_param":
-            # Copied from platform
+            # Mark as copied from platform
             derived_from = prov.get("derived_from", "")
-            return f"# Source: {yaml_file} [{derived_from}] (copied as HPC param)"
-        else:
-            # File-level provenance only
-            return f"# Source: {yaml_file} [{hierarchical_path}]"
+            if derived_from:
+                parts.append(f"[{derived_from}] (copied as HPC param)")
+        
+        if hierarchical_path and operation != "copied_as_HPC_param":
+            parts.append(f"[{hierarchical_path}]")
+        
+        return "# " + " ".join(parts)
 
     def _inject_registry_provenance(self, yaml_file_path: str) -> None:
         """
@@ -2225,9 +2247,18 @@ class AutosubmitConfig(object):
                             # Build hierarchical key
                             hierarchical_key = '.'.join(current_path + [key])
                             
-                            # Look up in registry
-                            if hierarchical_key in self.provenance_registry:
-                                prov = self.provenance_registry[hierarchical_key]
+                            # Look up in provenance tracker
+                            if hierarchical_key in self.provenance_tracker.provenance_map:
+                                prov_entry = self.provenance_tracker.provenance_map[hierarchical_key]
+                                # Convert ProvEntry to dict for formatting
+                                prov = {
+                                    "yaml_file": prov_entry.file,
+                                    "line": prov_entry.line,
+                                    "col": prov_entry.col,
+                                    "category": prov_entry.category,
+                                    "hierarchical_path": hierarchical_key,
+                                    "operation": "computed" if prov_entry.category == "computed" else ""
+                                }
                                 comment = self._format_registry_comment(prov)
                                 
                                 # Replace '# no provenance' with registry comment
@@ -2299,13 +2330,16 @@ class AutosubmitConfig(object):
                         source = f"{source} line:{prov_entry.line}"
                         if prov_entry.col:
                             source = f"{source},col:{prov_entry.col}"
+                    # Add category to comment if available
+                    if prov_entry.category:
+                        source = f"{source} (category:{prov_entry.category})"
                     source = f"{source} [{param_path}]"
                     try:
                         commented_data.yaml_add_eol_comment(f"From: {source}", key)
                         comments_added += 1
                         Log.debug(f"[PROV] Added section comment: {param_path}")
-                    except Exception:
-                        pass  # If comment adding fails, continue without comment
+                    except Exception as e:
+                        Log.warning(f"[PROV] Failed to add section comment for {param_path}: {e}")
             else:
                 # Copy the value first
                 commented_data[key] = value
@@ -2316,13 +2350,16 @@ class AutosubmitConfig(object):
                         source = f"{source} line:{prov_entry.line}"
                         if prov_entry.col:
                             source = f"{source},col:{prov_entry.col}"
+                    # Add category to comment if available
+                    if prov_entry.category:
+                        source = f"{source} (category:{prov_entry.category})"
                     source = f"{source} [{param_path}]"
                     try:
                         commented_data.yaml_add_eol_comment(f"Source: {source}", key)
                         comments_added += 1
                         Log.debug(f"[PROV] Added leaf comment: {param_path} -> {source}")
-                    except Exception:
-                        pass  # If comment adding fails, continue without comment
+                    except Exception as e:
+                        Log.warning(f"[PROV] Failed to add leaf comment for {param_path}: {e}")
                 else:
                     Log.debug(f"[PROV] No provenance found for: {param_path}")
         
@@ -2351,7 +2388,24 @@ class AutosubmitConfig(object):
                 
                 # Add provenance comments if tracking is enabled
                 if self.track_provenance and hasattr(self, 'provenance_tracker'):
+                    # DIAGNOSTIC LOGGING
+                    try:
+                        num_tracked = len(self.provenance_tracker.provenance_map)
+                        Log.info(f"[DIAG] Tracker has {num_tracked} entries before comment generation")
+                        if num_tracked > 0:
+                            examples = list(self.provenance_tracker.provenance_map.keys())[:5]
+                            Log.info(f"[DIAG] Example keys in tracker: {examples}")
+                        else:
+                            Log.warning(f"[DIAG] Tracker is EMPTY - no comments will be added!")
+                        
+                        # Show first few data keys
+                        data_keys = list(data_to_save.keys())[:5]
+                        Log.info(f"[DIAG] Top-level data keys: {data_keys}")
+                    except Exception as e:
+                        Log.warning(f"[DIAG] Failed to inspect tracker: {e}")
+                    
                     data_to_save = self._add_provenance_comments(data_to_save)
+                    Log.info(f"[DIAG] After _add_provenance_comments, type={type(data_to_save).__name__}")
                 
                 # Save using ruamel.yaml
                 yaml_dumper = YAML()
