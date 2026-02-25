@@ -35,7 +35,19 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
-from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, ListWithProvenance, dump_yaml, clean_provenance, wrapper_with_provenance_factory
+from yaml_provenance import (
+    ProvenanceConfig,
+    configure as configure_provenance,
+    DictWithProvenance,
+    ListWithProvenance,
+    dump_yaml,
+    clean_provenance,
+    ProvenanceTracker,
+    load_yaml_with_tracking,
+    track_yaml_provenance,
+    track_dict_keys_only,
+    track_computed_parameter
+)
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -87,6 +99,10 @@ class AutosubmitConfig(object):
             track_history=False,  # Lightweight mode
             on_conflict="warn"
         ))
+        
+        # Initialize ProvenanceTracker (Registry Pattern)
+        self.provenance_tracker = ProvenanceTracker()
+        self.track_provenance_enabled = True  # Config option to enable/disable tracking
 
     @property
     def jobs_data(self) -> dict[str, Any]:
@@ -189,6 +205,84 @@ class AutosubmitConfig(object):
         Log.info(f"[TRACE] save(): Calling dump_yaml to write to {filepath}")
         dump_yaml(self.experiment_data, filepath=filepath)
         Log.info(f"[TRACE] save(): dump_yaml completed")
+
+    def track_provenance(
+        self, 
+        param_path: str, 
+        file_path: str,
+        line: Optional[int] = None,
+        col: Optional[int] = None
+    ) -> None:
+        """
+        Track provenance using ProvenanceTracker (Registry Pattern).
+        
+        :param param_path: Dot-separated parameter path (e.g., "DEFAULT.EXPID")
+        :param file_path: Source YAML file path or description for computed values
+        :param line: Line number in file (1-indexed, optional)
+        :param col: Column number in file (1-indexed, optional)
+        """
+        if not self.track_provenance_enabled:
+            return
+        
+        self.provenance_tracker.track(param_path, file_path, line=line, col=col)
+
+    def get_provenance_comment(self, param_path: str) -> str:
+        """
+        Get provenance comment for a parameter from tracker.
+        
+        :param param_path: Dot-separated parameter path (e.g., "DEFAULT.EXPID")
+        :return: Formatted comment string or empty string
+        """
+        prov = self.provenance_tracker.get(param_path)
+        if not prov:
+            return ""
+        
+        # Format provenance as comment
+        if prov.line is not None:
+            if prov.col is not None:
+                return f"# From {prov.file} (line {prov.line}, col {prov.col})"
+            else:
+                return f"# From {prov.file} (line {prov.line})"
+        else:
+            return f"# From {prov.file}"
+
+    def _track_loaded_dict(self, data, parent_path: str = "", source_file: str = "<unknown>"):
+        """
+        Recursively track provenance for all loaded YAML data using tracker.
+        
+        :param data: Dictionary loaded from YAML
+        :param parent_path: Hierarchical path prefix (e.g., "DEFAULT" or "PLATFORMS.MN5")
+        :param source_file: Path to source YAML file
+        """
+        if not isinstance(data, dict):
+            return
+        
+        for key, value in data.items():
+            # Build hierarchical path
+            hierarchical_path = f"{parent_path}.{key}" if parent_path else key
+            
+            # Extract line/col from wrapper provenance if available
+            line, col = None, None
+            if hasattr(value, 'provenance') and value.provenance:
+                prov_list = value.provenance
+                if prov_list:
+                    last_prov = prov_list[-1]
+                    line = last_prov.get("line")
+                    col = last_prov.get("col")
+                    file_path = last_prov.get("yaml_file", source_file)
+                else:
+                    file_path = source_file
+            else:
+                file_path = source_file
+            
+            # Track using the tracker
+            self.track_provenance(hierarchical_path, file_path, line=line, col=col)
+            
+            # Recurse into nested dicts
+            if isinstance(value, dict) or (hasattr(value, 'value') and isinstance(getattr(value, 'value', None), dict)):
+                unwrapped_value = value.value if hasattr(value, 'value') else value
+                if isinstance(unwrapped_value, dict):
+                    self._track_loaded_dict(unwrapped_value, hierarchical_path, source_file)
 
     def get_project_dir(self) -> str:
         """Returns experiment's project destination directory.
@@ -832,7 +926,7 @@ class AutosubmitConfig(object):
         return data
 
     def load_config_file(self, current_folder_data, yaml_file, load_misc=False, category=None):
-        """Load a config file and parse it with provenance tracking
+        """Load a config file and parse it with provenance tracking (3-point strategy)
         :param current_folder_data: current folder data
         :param yaml_file: yaml file to load
         :param load_misc: Whether to load misc files or not
@@ -840,14 +934,19 @@ class AutosubmitConfig(object):
         :return: unified config file
         """
 
-        # check if path is file o folder
-        # load yaml file with ruamel.yaml
-        
         # Determine category if not provided
         if category is None:
             category = self._determine_category(yaml_file)
 
+        # POINT 1: Track BEFORE normalization (while .lc metadata exists)
+        # Load the file and extract provenance from ruamel.yaml .lc metadata
         new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file, category=category)
+        
+        # Track provenance from .lc metadata BEFORE normalization
+        if self.track_provenance_enabled and new_file.data:
+            track_yaml_provenance(self.provenance_tracker, new_file.data, str(Path(yaml_file).resolve()))
+        
+        # NORMALIZATION (creates new dicts, strips .lc metadata)
         # No need to .copy() since parser.load() returns fresh data and normalize_variables creates a new dict
         new_file.data = self.normalize_variables(new_file.data,
                                                  must_exists=False)
@@ -858,7 +957,15 @@ class AutosubmitConfig(object):
             self.misc_files.append(yaml_file)
             new_file.data = {}
         self._delete_autosubmit_calculated_variables(new_file.data)
-        return self.unify_conf(current_folder_data, new_file.data)
+        
+        # MERGE with current data
+        unified_result = self.unify_conf(current_folder_data, new_file.data)
+        
+        # POINT 2: Track after merging (safety net for keys without .lc metadata)
+        if self.track_provenance_enabled and new_file.data:
+            track_dict_keys_only(self.provenance_tracker, new_file.data, str(Path(yaml_file).resolve()))
+        
+        return unified_result
     
     def _determine_category(self, file_path):
         """Determine provenance category based on file location
@@ -1928,34 +2035,17 @@ class AutosubmitConfig(object):
         :param parameters: current loaded parameters.
         :return: dict
         """
-        from yaml_provenance import wrapper_with_provenance_factory
+        # Note: This is a static method so we can't access self.provenance_tracker
+        # Provenance for AS_ENV_* variables should be tracked by the caller
         
         for key, value in os.environ.items():
             if key.startswith("AS_ENV"):
-                # Wrap with environment provenance
-                parameters[key] = wrapper_with_provenance_factory(
-                    value,
-                    {
-                        "yaml_file": f"<environment:{key}>",
-                        "line": 0,
-                        "col": 0,
-                        "category": "environment",
-                        "env_var": key
-                    }
-                )
+                parameters[key] = value
         
         current_user = os.environ.get("SUDO_USER", os.environ.get("USER", None))
         if current_user:
-            parameters["AS_ENV_CURRENT_USER"] = wrapper_with_provenance_factory(
-                current_user,
-                {
-                    "yaml_file": "<environment:USER>",
-                    "line": 0,
-                    "col": 0,
-                    "category": "environment",
-                    "source": "SUDO_USER or USER"
-                }
-            )
+            parameters["AS_ENV_CURRENT_USER"] = current_user
+        
         return parameters
 
     def needs_reload(self) -> bool:
@@ -1990,6 +2080,17 @@ class AutosubmitConfig(object):
             for filename in self.get_yaml_filenames_to_load(self.conf_folder_yaml):
                 starter_conf = self.unify_conf(starter_conf, self.load_config_file(starter_conf, Path(filename)))
             starter_conf = self.load_as_env_variables(starter_conf)
+            
+            # POINT 3: Track AS_ENV_* variables (computed from environment)
+            for key, value in starter_conf.items():
+                if key.startswith("AS_ENV"):
+                    track_computed_parameter(
+                        self.provenance_tracker,
+                        key,
+                        value,
+                        f"<environment:{key}>"
+                    )
+            
             starter_conf = self.load_common_parameters(starter_conf)
             self.starter_conf = starter_conf
             # Same data without the minimal config ( if any ), need to be here due to current_loaded_files variable
@@ -2018,23 +2119,52 @@ class AutosubmitConfig(object):
                 del self.experiment_data["AS_TEMP"]
             # IF expid and hpcarch are not defined, use the ones from the minimal.yml file
             self.deep_add_missing_starter_conf(self.experiment_data, starter_conf)
+            
+            # PHASE 2: Track all loaded configuration data
+            # Track at the top level of experiment_data
+            for section_name, section_data in self.experiment_data.items():
+                if isinstance(section_data, dict):
+                    # Track nested sections like DEFAULT, PLATFORMS, JOBS, etc.
+                    self._track_loaded_dict(section_data, parent_path=section_name, source_file="<merged>")
+                elif hasattr(section_data, 'provenance') and section_data.provenance:
+                    # Extract provenance info from wrapper
+                    prov_list = section_data.provenance
+                    if prov_list:
+                        last_prov = prov_list[-1]
+                        file_path = last_prov.get("yaml_file", "<unknown>")
+                        line = last_prov.get("line")
+                        col = last_prov.get("col")
+                        self.track_provenance(section_name, file_path, line=line, col=col)
+            
+            # POINT 3: Track computed parameters
             self.experiment_data['ROOTDIR'] = os.path.join(
                 BasicConfig.LOCAL_ROOT_DIR, self.expid)
             self.experiment_data['PROJDIR'] = self.get_project_dir()
             
-            # Wrap BasicConfig properties with system provenance
-            from yaml_provenance import wrapper_with_provenance_factory
+            # Track ROOTDIR and PROJDIR as computed
+            track_computed_parameter(
+                self.provenance_tracker,
+                "ROOTDIR",
+                self.experiment_data['ROOTDIR'],
+                "computed:LOCAL_ROOT_DIR/EXPID"
+            )
+            track_computed_parameter(
+                self.provenance_tracker,
+                "PROJDIR",
+                self.experiment_data['PROJDIR'],
+                "computed:PROJECT_DESTINATION"
+            )
+            
+            # Load BasicConfig properties and track them
             basic_config_props = BasicConfig().props()
             for key, value in basic_config_props.items():
-                self.experiment_data[key] = wrapper_with_provenance_factory(
+                self.experiment_data[key] = value
+                # Track BasicConfig properties as system-provided
+                track_computed_parameter(
+                    self.provenance_tracker,
+                    key,
                     value,
-                    {
-                        "yaml_file": "<system:BasicConfig>",
-                        "line": 0,
-                        "col": 0,
-                        "category": "system",
-                        "property_name": key
-                    }
+                    f"<system:BasicConfig.{key}>"
                 )
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
@@ -2099,57 +2229,34 @@ class AutosubmitConfig(object):
 
         :param parameters: Dictionary to populate with HPC values. If None, use self.experiment_data.
         """
-        from yaml_provenance import wrapper_with_provenance_factory
-        
         platforms = self.experiment_data.get("PLATFORMS", {})
         hpcarch: str = self.experiment_data.get("DEFAULT", {}).get("HPCARCH", "LOCAL")
         hpcarch_data: dict = platforms.get(hpcarch, {})
 
         target = parameters if parameters is not None else self.experiment_data
 
-        # Copy HPC parameters with provenance preservation
+        # Copy HPC parameters (extracting raw values to avoid wrapper recursion)
         for name, value in hpcarch_data.items():
-            # Try to get provenance from source value
-            source_prov = None
-            if hasattr(value, 'provenance'):
-                source_prov = value.provenance[-1]
-            
-            # Check if parent dict has provenance map
-            if source_prov is None and hasattr(hpcarch_data, '_provenance_map') and name in hpcarch_data._provenance_map:
-                source_prov = hpcarch_data._provenance_map[name]
-            
-            if source_prov:
-                # Preserve original provenance, mark as derived
-                new_prov = dict(source_prov) if isinstance(source_prov, dict) else {}
-                new_prov["derived_from"] = f"PLATFORMS.{hpcarch}.{name}"
-                new_prov["operation"] = "copied_as_HPC_param"
-            else:
-                # Create synthetic provenance for derived value
-                new_prov = {
-                    "yaml_file": f"<derived:PLATFORMS.{hpcarch}.{name}>",
-                    "line": 0,
-                    "col": 0,
-                    "category": "derived",
-                    "subcategory": "hpc_params",
-                    "operation": "copied_as_HPC_param"
-                }
-            
-            # Extract raw value if already wrapped to avoid recursion
+            # Extract raw value if wrapped
             raw_value = value.value if hasattr(value, 'value') else value
-            target[f"HPC{name}"] = wrapper_with_provenance_factory(raw_value, new_prov)
+            target[f"HPC{name}"] = raw_value
+            
+            # Track as derived parameter
+            track_computed_parameter(
+                self.provenance_tracker,
+                f"HPC{name}",
+                raw_value,
+                f"derived:PLATFORMS.{hpcarch}.{name}"
+            )
 
-        # HPCARCH itself with derived provenance
-        # Extract raw value if already wrapped to avoid recursion
+        # HPCARCH itself
         raw_hpcarch = hpcarch.value if hasattr(hpcarch, 'value') else hpcarch
-        target["HPCARCH"] = wrapper_with_provenance_factory(
+        target["HPCARCH"] = raw_hpcarch
+        track_computed_parameter(
+            self.provenance_tracker,
+            "HPCARCH",
             raw_hpcarch,
-            {
-                "yaml_file": "<derived:DEFAULT.HPCARCH>",
-                "line": 0,
-                "col": 0,
-                "category": "derived",
-                "operation": "copied_from_DEFAULT"
-            }
+            "derived:DEFAULT.HPCARCH"
         )
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
@@ -2160,60 +2267,162 @@ class AutosubmitConfig(object):
             rootdir_path = Path(scratch) / project / user / self.expid
             logdir_path = rootdir_path / f"LOG_{self.expid}"
             
-            # Computed paths with provenance
-            target["HPCROOTDIR"] = wrapper_with_provenance_factory(
+            # Computed paths
+            target["HPCROOTDIR"] = str(rootdir_path)
+            track_computed_parameter(
+                self.provenance_tracker,
+                "HPCROOTDIR",
                 str(rootdir_path),
-                {
-                    "yaml_file": "<computed:HPCROOTDIR>",
-                    "line": 0,
-                    "col": 0,
-                    "category": "computed",
-                    "subcategory": "paths",
-                    "operation": "path_join",
-                    "computed_from": f"{scratch}/{project}/{user}/{self.expid}"
-                }
+                f"computed:{scratch}/{project}/{user}/{self.expid}"
             )
-            target["HPCLOGDIR"] = wrapper_with_provenance_factory(
+            
+            target["HPCLOGDIR"] = str(logdir_path)
+            track_computed_parameter(
+                self.provenance_tracker,
+                "HPCLOGDIR",
                 str(logdir_path),
-                {
-                    "yaml_file": "<computed:HPCLOGDIR>",
-                    "line": 0,
-                    "col": 0,
-                    "category": "computed",
-                    "subcategory": "paths",
-                    "operation": "path_join"
-                }
+                f"computed:HPCROOTDIR/LOG_{self.expid}"
             )
         # Default local paths.
         elif hpcarch.upper() == "LOCAL":
             rootdir_path = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
             logdir_path = rootdir_path / f"LOG_{self.expid}"
             
-            target["HPCROOTDIR"] = wrapper_with_provenance_factory(
+            target["HPCROOTDIR"] = str(rootdir_path)
+            track_computed_parameter(
+                self.provenance_tracker,
+                "HPCROOTDIR",
                 str(rootdir_path),
-                {
-                    "yaml_file": "<computed:HPCROOTDIR>",
-                    "line": 0,
-                    "col": 0,
-                    "category": "computed",
-                    "operation": "local_path_default"
-                }
+                "computed:LOCAL_ROOT_DIR/EXPID/LOCAL_TMP_DIR"
             )
-            target["HPCLOGDIR"] = wrapper_with_provenance_factory(
+            
+            target["HPCLOGDIR"] = str(logdir_path)
+            track_computed_parameter(
+                self.provenance_tracker,
+                "HPCLOGDIR",
                 str(logdir_path),
-                {
-                    "yaml_file": "<computed:HPCLOGDIR>",
-                    "line": 0,
-                    "col": 0,
-                    "category": "computed",
-                    "operation": "local_path_default"
-                }
+                "computed:HPCROOTDIR/LOG_EXPID"
             )
-
-        # Convert Path objects to strings if needed (already done above with str())
-        # No conversion needed since we already wrapped strings
 
         self.substitute_dynamic_variables(target)
+
+    def _format_registry_comment(self, prov: dict) -> str:
+        """
+        Format provenance registry entry as YAML comment.
+        
+        :param prov: Provenance dict from registry
+        :return: Formatted comment string
+        """
+        yaml_file = prov.get("yaml_file", "<unknown>")
+        line = prov.get("line")
+        col = prov.get("col")
+        hierarchical_path = prov.get("hierarchical_path", "")
+        operation = prov.get("operation", "")
+        
+        # Format based on available info
+        if line is not None and col is not None:
+            # Full provenance: file, line, col, path
+            return f"# Source: {yaml_file} line:{line},col:{col} [{hierarchical_path}]"
+        elif operation == "computed":
+            # Computed value
+            return f"# Computed: {yaml_file}"
+        elif operation == "copied_as_HPC_param":
+            # Copied from platform
+            derived_from = prov.get("derived_from", "")
+            return f"# Source: {yaml_file} [{derived_from}] (copied as HPC param)"
+        else:
+            # File-level provenance only
+            return f"# Source: {yaml_file} [{hierarchical_path}]"
+
+    def _inject_registry_provenance(self, yaml_file_path: str) -> None:
+        """
+        Post-process YAML file to replace '# no provenance' with registry info.
+        
+        Tracks hierarchical paths by parsing YAML structure and replaces
+        '# no provenance' comments with actual provenance from the registry.
+        
+        :param yaml_file_path: Path to experiment_data.yml
+        """
+        import re
+        import sys
+        
+        # Read YAML content
+        with open(yaml_file_path, 'r') as f:
+            lines = f.readlines()
+        
+        modified_lines = []
+        current_path = []  # Track hierarchical path as we parse
+        indent_stack = [-1]  # Track indentation levels, start with -1 for root
+        replacements_made = 0
+        
+        for line_num, line in enumerate(lines, 1):
+            # Track section hierarchy based on indentation
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith('#'):
+                # Empty line or comment-only line
+                modified_lines.append(line)
+                continue
+            
+            current_indent = len(line) - len(stripped)
+            
+            # Update path stack based on indentation
+            while indent_stack and current_indent <= indent_stack[-1]:
+                indent_stack.pop()
+                if current_path:
+                    current_path.pop()
+            
+            # Check if this is a key line (contains ':')
+            if ':' in stripped:
+                # Extract key (before the colon)
+                key_match = re.match(r'^([A-Za-z0-9_-]+):', stripped)
+                if key_match:
+                    key = key_match.group(1)
+                    
+                    # Check if this is a mapping key (no value after colon or nested content)
+                    rest_of_line = stripped[key_match.end():].strip()
+                    is_mapping_key = not rest_of_line or rest_of_line.startswith('#')
+                    
+                    if is_mapping_key:
+                        # This is a section/mapping key, add to path
+                        current_path.append(key)
+                        indent_stack.append(current_indent)
+                        modified_lines.append(line)
+                    else:
+                        # This is a key-value pair, check for '# no provenance'
+                        if '# no provenance' in line:
+                            # Build hierarchical key
+                            hierarchical_key = '.'.join(current_path + [key])
+                            
+                            # Look up in registry
+                            if hierarchical_key in self.provenance_registry:
+                                prov = self.provenance_registry[hierarchical_key]
+                                comment = self._format_registry_comment(prov)
+                                
+                                # Replace '# no provenance' with registry comment
+                                new_line = line.replace('# no provenance', comment)
+                                modified_lines.append(new_line)
+                                replacements_made += 1
+                                
+                                if replacements_made <= 5:  # Log first few replacements
+                                    print(f"[INJECT] Replaced line {line_num}: {hierarchical_key}", file=sys.stderr, flush=True)
+                            else:
+                                # Not in registry, keep original
+                                modified_lines.append(line)
+                        else:
+                            # No '# no provenance', keep original
+                            modified_lines.append(line)
+                else:
+                    # Not a standard key, keep original
+                    modified_lines.append(line)
+            else:
+                # No colon, likely a list item or continuation
+                modified_lines.append(line)
+        
+        # Write back modified content
+        with open(yaml_file_path, 'w') as f:
+            f.writelines(modified_lines)
+        
+        print(f"[INJECT] Registry injection complete: {replacements_made} replacements made", file=sys.stderr, flush=True)
 
     def save(self) -> None:
         """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file with provenance comments."""
@@ -2247,8 +2456,15 @@ class AutosubmitConfig(object):
                 else:
                     print(f"[DEBUG-SAVE] Has _provenance_map: False", file=sys.stderr, flush=True)
                 
+                # Step 1: Use yaml_provenance dump_yaml
                 dump_yaml(self.experiment_data, filepath=str(output_file))
-                print(f"[DEBUG-SAVE] dump_yaml completed successfully\n", file=sys.stderr, flush=True)
+                print(f"[DEBUG-SAVE] dump_yaml completed successfully", file=sys.stderr, flush=True)
+                
+                # Step 2: Post-process to inject registry provenance
+                print(f"[DEBUG-SAVE] Registry size: {len(self.provenance_registry)} entries", file=sys.stderr, flush=True)
+                self._inject_registry_provenance(str(output_file))
+                print(f"[DEBUG-SAVE] Registry injection completed\n", file=sys.stderr, flush=True)
+                
                 output_file.chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
