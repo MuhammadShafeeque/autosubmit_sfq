@@ -38,14 +38,8 @@ from ruamel.yaml import YAML
 from yaml_provenance import (
     ProvenanceConfig,
     configure as configure_provenance,
-    DictWithProvenance,
-    ListWithProvenance,
-    dump_yaml,
     clean_provenance,
     ProvenanceTracker,
-    load_yaml_with_tracking,
-    track_yaml_provenance,
-    track_dict_keys_only,
     track_computed_parameter
 )
 
@@ -102,7 +96,6 @@ class AutosubmitConfig(object):
         
         # Initialize ProvenanceTracker (Registry Pattern)
         self.provenance_tracker = ProvenanceTracker()
-        self.track_provenance_enabled = True  # Config option to enable/disable tracking
 
     @property
     def jobs_data(self) -> dict[str, Any]:
@@ -170,119 +163,23 @@ class AutosubmitConfig(object):
         """
         Save experiment_data to YAML file with provenance comments.
         
-        This method logs debug information about the provenance state before dumping.
+        This method saves experiment_data to a YAML file.
+        With tracker-based API, data is plain dict (no provenance comments in output).
         
         :param filepath: Path to output YAML file
         :type filepath: str
         """
-        # Log provenance state before dumping
-        Log.info(f"[TRACE] save(): Preparing to dump experiment_data")
-        Log.info(f"[TRACE]   Type of self.experiment_data: {type(self.experiment_data).__name__}")
-        Log.info(f"[TRACE]   Is DictWithProvenance: {isinstance(self.experiment_data, DictWithProvenance)}")
+        # Use ruamel.yaml to dump plain dict
+        yaml_dumper = YAML()
+        yaml_dumper.default_flow_style = False
+        yaml_dumper.preserve_quotes = True
         
-        if hasattr(self.experiment_data, '_provenance_map'):
-            Log.info(f"[TRACE]   Has _provenance_map: True")
-            Log.info(f"[TRACE]   Size of _provenance_map: {len(self.experiment_data._provenance_map)}")
-            
-            # Show a few example keys from _provenance_map
-            if self.experiment_data._provenance_map:
-                sample_keys = list(self.experiment_data._provenance_map.keys())[:5]
-                Log.info(f"[TRACE]   Sample keys in _provenance_map: {sample_keys}")
-                
-                # Show details of first key
-                if sample_keys:
-                    first_key = sample_keys[0]
-                    prov_entry = self.experiment_data._provenance_map[first_key]
-                    Log.info(f"[TRACE]   Example entry for key '{first_key}':")
-                    Log.info(f"[TRACE]     Type: {type(prov_entry).__name__}")
-                    if isinstance(prov_entry, dict) and 'yaml_file' in prov_entry:
-                        Log.info(f"[TRACE]     yaml_file: {prov_entry.get('yaml_file')}")
-                        Log.info(f"[TRACE]     line: {prov_entry.get('line')}")
-        else:
-            Log.info(f"[TRACE]   Has _provenance_map: False")
+        with open(filepath, 'w') as f:
+            yaml_dumper.dump(self.experiment_data, f)
         
-        # Now call dump_yaml
-        Log.info(f"[TRACE] save(): Calling dump_yaml to write to {filepath}")
-        dump_yaml(self.experiment_data, filepath=filepath)
-        Log.info(f"[TRACE] save(): dump_yaml completed")
+        Log.info(f"[TRACE] save(): Saved configuration to {filepath}")
 
-    def track_provenance(
-        self, 
-        param_path: str, 
-        file_path: str,
-        line: Optional[int] = None,
-        col: Optional[int] = None
-    ) -> None:
-        """
-        Track provenance using ProvenanceTracker (Registry Pattern).
-        
-        :param param_path: Dot-separated parameter path (e.g., "DEFAULT.EXPID")
-        :param file_path: Source YAML file path or description for computed values
-        :param line: Line number in file (1-indexed, optional)
-        :param col: Column number in file (1-indexed, optional)
-        """
-        if not self.track_provenance_enabled:
-            return
-        
-        self.provenance_tracker.track(param_path, file_path, line=line, col=col)
 
-    def get_provenance_comment(self, param_path: str) -> str:
-        """
-        Get provenance comment for a parameter from tracker.
-        
-        :param param_path: Dot-separated parameter path (e.g., "DEFAULT.EXPID")
-        :return: Formatted comment string or empty string
-        """
-        prov = self.provenance_tracker.get(param_path)
-        if not prov:
-            return ""
-        
-        # Format provenance as comment
-        if prov.line is not None:
-            if prov.col is not None:
-                return f"# From {prov.file} (line {prov.line}, col {prov.col})"
-            else:
-                return f"# From {prov.file} (line {prov.line})"
-        else:
-            return f"# From {prov.file}"
-
-    def _track_loaded_dict(self, data, parent_path: str = "", source_file: str = "<unknown>"):
-        """
-        Recursively track provenance for all loaded YAML data using tracker.
-        
-        :param data: Dictionary loaded from YAML
-        :param parent_path: Hierarchical path prefix (e.g., "DEFAULT" or "PLATFORMS.MN5")
-        :param source_file: Path to source YAML file
-        """
-        if not isinstance(data, dict):
-            return
-        
-        for key, value in data.items():
-            # Build hierarchical path
-            hierarchical_path = f"{parent_path}.{key}" if parent_path else key
-            
-            # Extract line/col from wrapper provenance if available
-            line, col = None, None
-            if hasattr(value, 'provenance') and value.provenance:
-                prov_list = value.provenance
-                if prov_list:
-                    last_prov = prov_list[-1]
-                    line = last_prov.get("line")
-                    col = last_prov.get("col")
-                    file_path = last_prov.get("yaml_file", source_file)
-                else:
-                    file_path = source_file
-            else:
-                file_path = source_file
-            
-            # Track using the tracker
-            self.track_provenance(hierarchical_path, file_path, line=line, col=col)
-            
-            # Recurse into nested dicts
-            if isinstance(value, dict) or (hasattr(value, 'value') and isinstance(getattr(value, 'value', None), dict)):
-                unwrapped_value = value.value if hasattr(value, 'value') else value
-                if isinstance(unwrapped_value, dict):
-                    self._track_loaded_dict(unwrapped_value, hierarchical_path, source_file)
 
     def get_project_dir(self) -> str:
         """Returns experiment's project destination directory.
@@ -582,103 +479,53 @@ class AutosubmitConfig(object):
         If a value is a list, it iterates through the list and normalizes any dictionaries keys within it.
         Other types of values are added to the normalized dictionary as is.
         
-        Provenance tracking is preserved if the input data is a DictWithProvenance or ListWithProvenance.
+        With tracker-based API, works with plain dicts (provenance tracked separately).
 
         :param data: The dictionary to normalize.
         :type data: dict[str, Any]
         :return: A new dictionary with all keys normalized to uppercase.
         :rtype: dict[str, Any]
         """
-        # Preserve DictWithProvenance type by extracting and mapping provenance
-        if isinstance(data, DictWithProvenance):
-            # Extract provenance structure from source
-            source_provenance = data.get_provenance()
-            normalized_dict = {}
-            normalized_prov = {}
-            
-            for key, val in data.items():
-                normalized_key = str(key).upper()
-                
-                if isinstance(val, collections.abc.Mapping):
-                    normalized_dict[normalized_key] = self.deep_normalize(val)
-                elif isinstance(val, list):
-                    normalized_dict[normalized_key] = self._deep_normalize_list(val)
-                else:
-                    # Keep the value as-is (may be a wrapped type with provenance)
-                    normalized_dict[normalized_key] = val
-                
-                # Map provenance from old key to new uppercase key
-                if key in source_provenance:
-                    normalized_prov[normalized_key] = source_provenance[key]
-            
-            # Create DictWithProvenance with BOTH normalized data AND provenance
-            return DictWithProvenance(normalized_dict, normalized_prov, config=data._config)
-        else:
-            # Plain dict - no provenance to preserve
-            normalized_data = dict()
-            for key, val in data.items():
-                normalized_key = str(key).upper()
-                if isinstance(val, collections.abc.Mapping):
-                    normalized_data[normalized_key] = self.deep_normalize(val)
-                elif isinstance(val, list):
-                    normalized_data[normalized_key] = self._deep_normalize_list(val)
-                else:
-                    normalized_data[normalized_key] = val
-            return normalized_data
+        # With tracker-based API, work with plain dicts (provenance tracked separately)
+        normalized_data = dict()
+        for key, val in data.items():
+            normalized_key = str(key).upper()
+            if isinstance(val, collections.abc.Mapping):
+                normalized_data[normalized_key] = self.deep_normalize(val)
+            elif isinstance(val, list):
+                normalized_data[normalized_key] = self._deep_normalize_list(val)
+            else:
+                normalized_data[normalized_key] = val
+        return normalized_data
     
     def _deep_normalize_list(self, lst: list) -> list:
-        """Helper to normalize lists while preserving ListWithProvenance."""
-        if isinstance(lst, ListWithProvenance):
-            # Extract provenance from source list
-            source_provenance = lst.get_provenance()
-            normalized_list_data = []
-            normalized_list_prov = []
-            
-            for i, item in enumerate(lst):
-                if isinstance(item, collections.abc.Mapping):
-                    normalized_list_data.append(self.deep_normalize(item))
-                else:
-                    normalized_list_data.append(item)
-                
-                # Map provenance for this index
-                if i < len(source_provenance):
-                    normalized_list_prov.append(source_provenance[i])
-            
-            return ListWithProvenance(normalized_list_data, normalized_list_prov, config=lst._config)
-        else:
-            # Plain list
-            normalized_list = []
-            for item in lst:
-                if isinstance(item, collections.abc.Mapping):
-                    normalized_list.append(self.deep_normalize(item))
-                else:
-                    normalized_list.append(item)
-            return normalized_list
+        """Helper to normalize lists (tracker-based API uses plain lists)."""
+        normalized_list = []
+        for item in lst:
+            if isinstance(item, collections.abc.Mapping):
+                normalized_list.append(self.deep_normalize(item))
+            else:
+                normalized_list.append(item)
+        return normalized_list
 
     def deep_update(self, unified_config, new_dict):
-        """Update a nested dictionary or similar mapping, preserving provenance.
+        """Update a nested dictionary or similar mapping.
         Modify ``unified_config`` in place.
+        With tracker-based API, works with plain dicts (provenance tracked separately).
         """
-        # Convert to DictWithProvenance if needed
+        # Ensure we're working with dicts
         if not isinstance(unified_config, collections.abc.Mapping):
-            unified_config = DictWithProvenance({}, {})
-        elif not isinstance(unified_config, DictWithProvenance) and isinstance(unified_config, dict):
-            unified_config = DictWithProvenance(unified_config, {})
-        
-        # If new_dict is a plain dict, convert it (though it should already be DictWithProvenance from load)
-        if isinstance(new_dict, dict) and not isinstance(new_dict, DictWithProvenance):
-            new_dict = DictWithProvenance(new_dict, {})
+            unified_config = {}
         
         # Initialize keys from new_dict in unified_config
         for key in new_dict.keys():
             if key not in unified_config:
                 unified_config[key] = ""
         
-        # Update with provenance preservation
+        # Update recursively
         for key, val in new_dict.items():
             if isinstance(val, collections.abc.Mapping):
                 # Recursive merge for nested dicts
-                # Use plain {} as default - deep_update will convert it to DictWithProvenance
                 tmp = self.deep_update(unified_config.get(key, {}), val)
                 unified_config[key] = tmp
             elif isinstance(val, list):
@@ -689,7 +536,7 @@ class AutosubmitConfig(object):
                     if current_list != val:
                         unified_config[key] = val
             else:
-                # For scalar values, DictWithProvenance's __setitem__ preserves provenance
+                # For scalar values
                 unified_config[key] = new_dict[key]
         
         return unified_config
@@ -938,13 +785,12 @@ class AutosubmitConfig(object):
         if category is None:
             category = self._determine_category(yaml_file)
 
-        # POINT 1: Track BEFORE normalization (while .lc metadata exists)
-        # Load the file and extract provenance from ruamel.yaml .lc metadata
+        # Load the file with tracker-based API
         new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file, category=category)
         
-        # Track provenance from .lc metadata BEFORE normalization
-        if self.track_provenance_enabled and new_file.data:
-            track_yaml_provenance(self.provenance_tracker, new_file.data, str(Path(yaml_file).resolve()))
+        # Merge parser's tracker into main tracker (tracker-based API)
+        if hasattr(new_file, 'tracker'):
+            self.provenance_tracker.merge(new_file.tracker)
         
         # NORMALIZATION (creates new dicts, strips .lc metadata)
         # No need to .copy() since parser.load() returns fresh data and normalize_variables creates a new dict
@@ -960,10 +806,6 @@ class AutosubmitConfig(object):
         
         # MERGE with current data
         unified_result = self.unify_conf(current_folder_data, new_file.data)
-        
-        # POINT 2: Track after merging (safety net for keys without .lc metadata)
-        if self.track_provenance_enabled and new_file.data:
-            track_dict_keys_only(self.provenance_tracker, new_file.data, str(Path(yaml_file).resolve()))
         
         return unified_result
     
@@ -2120,23 +1962,7 @@ class AutosubmitConfig(object):
             # IF expid and hpcarch are not defined, use the ones from the minimal.yml file
             self.deep_add_missing_starter_conf(self.experiment_data, starter_conf)
             
-            # PHASE 2: Track all loaded configuration data
-            # Track at the top level of experiment_data
-            for section_name, section_data in self.experiment_data.items():
-                if isinstance(section_data, dict):
-                    # Track nested sections like DEFAULT, PLATFORMS, JOBS, etc.
-                    self._track_loaded_dict(section_data, parent_path=section_name, source_file="<merged>")
-                elif hasattr(section_data, 'provenance') and section_data.provenance:
-                    # Extract provenance info from wrapper
-                    prov_list = section_data.provenance
-                    if prov_list:
-                        last_prov = prov_list[-1]
-                        file_path = last_prov.get("yaml_file", "<unknown>")
-                        line = last_prov.get("line")
-                        col = last_prov.get("col")
-                        self.track_provenance(section_name, file_path, line=line, col=col)
-            
-            # POINT 3: Track computed parameters
+            # Track computed parameters
             self.experiment_data['ROOTDIR'] = os.path.join(
                 BasicConfig.LOCAL_ROOT_DIR, self.expid)
             self.experiment_data['PROJDIR'] = self.get_project_dir()
@@ -2235,27 +2061,24 @@ class AutosubmitConfig(object):
 
         target = parameters if parameters is not None else self.experiment_data
 
-        # Copy HPC parameters (extracting raw values to avoid wrapper recursion)
+        # Copy HPC parameters
         for name, value in hpcarch_data.items():
-            # Extract raw value if wrapped
-            raw_value = value.value if hasattr(value, 'value') else value
-            target[f"HPC{name}"] = raw_value
+            target[f"HPC{name}"] = value
             
             # Track as derived parameter
             track_computed_parameter(
                 self.provenance_tracker,
                 f"HPC{name}",
-                raw_value,
+                value,
                 f"derived:PLATFORMS.{hpcarch}.{name}"
             )
 
         # HPCARCH itself
-        raw_hpcarch = hpcarch.value if hasattr(hpcarch, 'value') else hpcarch
-        target["HPCARCH"] = raw_hpcarch
+        target["HPCARCH"] = hpcarch
         track_computed_parameter(
             self.provenance_tracker,
             "HPCARCH",
-            raw_hpcarch,
+            hpcarch,
             "derived:DEFAULT.HPCARCH"
         )
 
@@ -2436,34 +2259,15 @@ class AutosubmitConfig(object):
                             self.metadata_folder.joinpath("experiment_data.yml.bak"))
 
             try:
-                # Use yaml-provenance dump_yaml to export with provenance comments
+                # Use tracker-based API to export (plain YAML)
                 output_file = self.metadata_folder.joinpath("experiment_data.yml")
                 
-                # Debug: Check experiment_data type and provenance map
-                import sys
-                print(f"\n[DEBUG-SAVE] About to call dump_yaml", file=sys.stderr, flush=True)
-                print(f"[DEBUG-SAVE] experiment_data type: {type(self.experiment_data).__name__}", file=sys.stderr, flush=True)
-                print(f"[DEBUG-SAVE] Is DictWithProvenance: {type(self.experiment_data).__name__ == 'DictWithProvenance'}", file=sys.stderr, flush=True)
-                if hasattr(self.experiment_data, '_provenance_map'):
-                    print(f"[DEBUG-SAVE] Has _provenance_map: True, size: {len(self.experiment_data._provenance_map)}", file=sys.stderr, flush=True)
-                    if self.experiment_data._provenance_map:
-                        sample_keys = list(self.experiment_data._provenance_map.keys())[:5]
-                        print(f"[DEBUG-SAVE] Sample _provenance_map keys: {sample_keys}", file=sys.stderr, flush=True)
-                        # Show first key's provenance in detail
-                        first_key = sample_keys[0]
-                        first_prov = self.experiment_data._provenance_map[first_key]
-                        print(f"[DEBUG-SAVE] Example provenance for '{first_key}': {first_prov}", file=sys.stderr, flush=True)
-                else:
-                    print(f"[DEBUG-SAVE] Has _provenance_map: False", file=sys.stderr, flush=True)
-                
-                # Step 1: Use yaml_provenance dump_yaml
-                dump_yaml(self.experiment_data, filepath=str(output_file))
-                print(f"[DEBUG-SAVE] dump_yaml completed successfully", file=sys.stderr, flush=True)
-                
-                # Step 2: Post-process to inject registry provenance
-                print(f"[DEBUG-SAVE] Registry size: {len(self.provenance_registry)} entries", file=sys.stderr, flush=True)
-                self._inject_registry_provenance(str(output_file))
-                print(f"[DEBUG-SAVE] Registry injection completed\n", file=sys.stderr, flush=True)
+                # Save using ruamel.yaml
+                yaml_dumper = YAML()
+                yaml_dumper.default_flow_style = False
+                yaml_dumper.preserve_quotes = True
+                with open(str(output_file), 'w') as f:
+                    yaml_dumper.dump(self.experiment_data, f)
                 
                 output_file.chmod(0o755)
             except Exception as e:

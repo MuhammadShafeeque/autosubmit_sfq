@@ -17,7 +17,7 @@
 
 
 from ruamel.yaml import YAML
-from yaml_provenance import load_yaml, ProvenanceConfig, configure
+from yaml_provenance import load_yaml_with_tracking, ProvenanceConfig, configure, ProvenanceTracker
 
 
 class YAMLParserFactory:
@@ -33,23 +33,24 @@ class YAMLParser(YAML):
     def __init__(self):
         self.data = []
         self.category = None
+        self.tracker = ProvenanceTracker()  # Store tracker for provenance
         super(YAMLParser, self).__init__(typ="safe")
     
     def load(self, stream, category=None):
         """
-        Load YAML with provenance tracking.
+        Load YAML with tracker-based provenance tracking.
         
         Parameters
         ----------
         stream : str, Path, or file-like object
             The YAML file path or file object to load
         category : str, optional
-            Category for provenance tracking
+            Category for provenance tracking (currently unused in tracker API)
             
         Returns
         -------
-        DictWithProvenance
-            The loaded data with provenance
+        dict
+            The loaded data as plain dict (not wrapper)
         """
         # Store category for potential later use
         if category is not None:
@@ -64,9 +65,11 @@ class YAMLParser(YAML):
             # Ensure Path objects are converted to strings for yaml_provenance
             filepath = str(stream)
         
-        # Simple category resolver that uses the provided category
-        def category_resolver(path):
-            return (self.category, None)
+        # Use tracker-based API: load_yaml_with_tracking returns (data, tracker)
+        data, tracker = load_yaml_with_tracking(filepath)
         
-        # Use yaml_provenance to load the file
-        return load_yaml(filepath, category_resolver=category_resolver if self.category else None)
+        # Store tracker for later access by configcommon.py
+        self.tracker = tracker
+        
+        # Return plain dict (not wrapper)
+        return data
