@@ -2099,7 +2099,7 @@ class AutosubmitConfig(object):
 
         :param parameters: Dictionary to populate with HPC values. If None, use self.experiment_data.
         """
-        from yaml_provenance import wrapper_with_provenance_factory, get_provenance
+        from yaml_provenance import wrapper_with_provenance_factory
         
         platforms = self.experiment_data.get("PLATFORMS", {})
         hpcarch: str = self.experiment_data.get("DEFAULT", {}).get("HPCARCH", "LOCAL")
