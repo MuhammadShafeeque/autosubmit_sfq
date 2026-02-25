@@ -35,6 +35,7 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 from yaml_provenance import (
     ProvenanceConfig,
     configure as configure_provenance,
@@ -96,6 +97,7 @@ class AutosubmitConfig(object):
         
         # Initialize ProvenanceTracker (Registry Pattern)
         self.provenance_tracker = ProvenanceTracker()
+        self.track_provenance = True  # Enable provenance comment generation
 
     @property
     def jobs_data(self) -> dict[str, Any]:
@@ -163,19 +165,26 @@ class AutosubmitConfig(object):
         """
         Save experiment_data to YAML file with provenance comments.
         
-        This method saves experiment_data to a YAML file.
-        With tracker-based API, data is plain dict (no provenance comments in output).
+        This method saves experiment_data to a YAML file with provenance
+        comments if tracking is enabled.
         
         :param filepath: Path to output YAML file
         :type filepath: str
         """
-        # Use ruamel.yaml to dump plain dict
+        # Prepare data for saving
+        data_to_save = clean_provenance(self.experiment_data)
+        
+        # Add provenance comments if tracking is enabled
+        if self.track_provenance and hasattr(self, 'provenance_tracker'):
+            data_to_save = self._add_provenance_comments(data_to_save)
+        
+        # Use ruamel.yaml to dump data
         yaml_dumper = YAML()
         yaml_dumper.default_flow_style = False
         yaml_dumper.preserve_quotes = True
         
         with open(filepath, 'w') as f:
-            yaml_dumper.dump(self.experiment_data, f)
+            yaml_dumper.dump(data_to_save, f)
         
         Log.info(f"[TRACE] save(): Saved configuration to {filepath}")
 
@@ -2247,6 +2256,81 @@ class AutosubmitConfig(object):
         
         print(f"[INJECT] Registry injection complete: {replacements_made} replacements made", file=sys.stderr, flush=True)
 
+    def _add_provenance_comments(self, data: dict, prefix: str = "") -> CommentedMap:
+        """Add inline provenance comments to configuration data.
+        
+        Recursively walks through the configuration dictionary and adds
+        end-of-line comments showing the source file for each parameter.
+        
+        Args:
+            data: Dictionary to annotate with comments
+            prefix: Dot-separated path prefix for nested keys
+            
+        Returns:
+            CommentedMap with provenance comments attached
+            
+        Example:
+            Output in YAML:
+            DEFAULT:
+              EXPID: a000  # Source: /path/to/minimal.yml line:10,col:3 [DEFAULT.EXPID]
+              HPCARCH: nord3v2  # Source: /path/to/main.yml line:15,col:5 [DEFAULT.HPCARCH]
+        """
+        # Create CommentedMap and check if tracking is enabled
+        if not self.track_provenance or not self.provenance_tracker:
+            return CommentedMap(data)
+        
+        # Process all items and build CommentedMap with proper nesting
+        commented_data = CommentedMap()
+        comments_added = 0
+        
+        for key, value in data.items():
+            param_path = f"{prefix}.{key}" if prefix else key
+            
+            # Get provenance for this parameter
+            prov_entry = self.provenance_tracker.get(param_path)
+            
+            if isinstance(value, dict):
+                # Recursively process nested dictionaries
+                commented_data[key] = self._add_provenance_comments(value, param_path)
+                # Add comment for the section itself if it has provenance
+                if prov_entry:
+                    source = prov_entry.file
+                    if prov_entry.line:
+                        source = f"{source} line:{prov_entry.line}"
+                        if prov_entry.col:
+                            source = f"{source},col:{prov_entry.col}"
+                    source = f"{source} [{param_path}]"
+                    try:
+                        commented_data.yaml_add_eol_comment(f"From: {source}", key)
+                        comments_added += 1
+                        Log.debug(f"[PROV] Added section comment: {param_path}")
+                    except Exception:
+                        pass  # If comment adding fails, continue without comment
+            else:
+                # Copy the value first
+                commented_data[key] = value
+                # Then add comment if provenance exists
+                if prov_entry:
+                    source = prov_entry.file
+                    if prov_entry.line:
+                        source = f"{source} line:{prov_entry.line}"
+                        if prov_entry.col:
+                            source = f"{source},col:{prov_entry.col}"
+                    source = f"{source} [{param_path}]"
+                    try:
+                        commented_data.yaml_add_eol_comment(f"Source: {source}", key)
+                        comments_added += 1
+                        Log.debug(f"[PROV] Added leaf comment: {param_path} -> {source}")
+                    except Exception:
+                        pass  # If comment adding fails, continue without comment
+                else:
+                    Log.debug(f"[PROV] No provenance found for: {param_path}")
+        
+        if not prefix and comments_added > 0:
+            Log.info(f"Added {comments_added} provenance comments to top-level data")
+        
+        return commented_data
+
     def save(self) -> None:
         """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file with provenance comments."""
         if self.is_current_logged_user_owner:
@@ -2259,15 +2343,22 @@ class AutosubmitConfig(object):
                             self.metadata_folder.joinpath("experiment_data.yml.bak"))
 
             try:
-                # Use tracker-based API to export (plain YAML)
+                # Use tracker-based API to export with provenance comments
                 output_file = self.metadata_folder.joinpath("experiment_data.yml")
+                
+                # Prepare data for saving
+                data_to_save = clean_provenance(self.experiment_data)
+                
+                # Add provenance comments if tracking is enabled
+                if self.track_provenance and hasattr(self, 'provenance_tracker'):
+                    data_to_save = self._add_provenance_comments(data_to_save)
                 
                 # Save using ruamel.yaml
                 yaml_dumper = YAML()
                 yaml_dumper.default_flow_style = False
                 yaml_dumper.preserve_quotes = True
                 with open(str(output_file), 'w') as f:
-                    yaml_dumper.dump(self.experiment_data, f)
+                    yaml_dumper.dump(data_to_save, f)
                 
                 output_file.chmod(0o755)
             except Exception as e:
