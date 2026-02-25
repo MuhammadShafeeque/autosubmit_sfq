@@ -2134,11 +2134,15 @@ class AutosubmitConfig(object):
                     "operation": "copied_as_HPC_param"
                 }
             
-            target[f"HPC{name}"] = wrapper_with_provenance_factory(value, new_prov)
+            # Extract raw value if already wrapped to avoid recursion
+            raw_value = value.value if hasattr(value, 'value') else value
+            target[f"HPC{name}"] = wrapper_with_provenance_factory(raw_value, new_prov)
 
         # HPCARCH itself with derived provenance
+        # Extract raw value if already wrapped to avoid recursion
+        raw_hpcarch = hpcarch.value if hasattr(hpcarch, 'value') else hpcarch
         target["HPCARCH"] = wrapper_with_provenance_factory(
-            hpcarch,
+            raw_hpcarch,
             {
                 "yaml_file": "<derived:DEFAULT.HPCARCH>",
                 "line": 0,
