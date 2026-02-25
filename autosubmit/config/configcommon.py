@@ -1929,10 +1929,34 @@ class AutosubmitConfig(object):
         :param parameters: current loaded parameters.
         :return: dict
         """
+        from yaml_provenance import wrapper_with_provenance_factory
+        
         for key, value in os.environ.items():
             if key.startswith("AS_ENV"):
-                parameters[key] = value
-        parameters["AS_ENV_CURRENT_USER"] = os.environ.get("SUDO_USER", os.environ.get("USER", None))
+                # Wrap with environment provenance
+                parameters[key] = wrapper_with_provenance_factory(
+                    value,
+                    {
+                        "yaml_file": f"<environment:{key}>",
+                        "line": 0,
+                        "col": 0,
+                        "category": "environment",
+                        "env_var": key
+                    }
+                )
+        
+        current_user = os.environ.get("SUDO_USER", os.environ.get("USER", None))
+        if current_user:
+            parameters["AS_ENV_CURRENT_USER"] = wrapper_with_provenance_factory(
+                current_user,
+                {
+                    "yaml_file": "<environment:USER>",
+                    "line": 0,
+                    "col": 0,
+                    "category": "environment",
+                    "source": "SUDO_USER or USER"
+                }
+            )
         return parameters
 
     def needs_reload(self) -> bool:
@@ -1998,7 +2022,21 @@ class AutosubmitConfig(object):
             self.experiment_data['ROOTDIR'] = os.path.join(
                 BasicConfig.LOCAL_ROOT_DIR, self.expid)
             self.experiment_data['PROJDIR'] = self.get_project_dir()
-            self.experiment_data.update(BasicConfig().props())
+            
+            # Wrap BasicConfig properties with system provenance
+            from yaml_provenance import wrapper_with_provenance_factory
+            basic_config_props = BasicConfig().props()
+            for key, value in basic_config_props.items():
+                self.experiment_data[key] = wrapper_with_provenance_factory(
+                    value,
+                    {
+                        "yaml_file": "<system:BasicConfig>",
+                        "line": 0,
+                        "col": 0,
+                        "category": "system",
+                        "property_name": key
+                    }
+                )
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
@@ -2062,32 +2100,115 @@ class AutosubmitConfig(object):
 
         :param parameters: Dictionary to populate with HPC values. If None, use self.experiment_data.
         """
+        from yaml_provenance import wrapper_with_provenance_factory, get_provenance
+        
         platforms = self.experiment_data.get("PLATFORMS", {})
         hpcarch: str = self.experiment_data.get("DEFAULT", {}).get("HPCARCH", "LOCAL")
         hpcarch_data: dict = platforms.get(hpcarch, {})
 
         target = parameters if parameters is not None else self.experiment_data
 
+        # Copy HPC parameters with provenance preservation
         for name, value in hpcarch_data.items():
-            target[f"HPC{name}"] = value
+            # Try to get provenance from source value
+            source_prov = None
+            if hasattr(value, '__provenance__'):
+                source_prov = get_provenance(value)
+            
+            # Check if parent dict has provenance map
+            if source_prov is None and hasattr(hpcarch_data, '_provenance_map') and name in hpcarch_data._provenance_map:
+                source_prov = hpcarch_data._provenance_map[name]
+            
+            if source_prov:
+                # Preserve original provenance, mark as derived
+                new_prov = dict(source_prov) if isinstance(source_prov, dict) else {}
+                new_prov["derived_from"] = f"PLATFORMS.{hpcarch}.{name}"
+                new_prov["operation"] = "copied_as_HPC_param"
+            else:
+                # Create synthetic provenance for derived value
+                new_prov = {
+                    "yaml_file": f"<derived:PLATFORMS.{hpcarch}.{name}>",
+                    "line": 0,
+                    "col": 0,
+                    "category": "derived",
+                    "subcategory": "hpc_params",
+                    "operation": "copied_as_HPC_param"
+                }
+            
+            target[f"HPC{name}"] = wrapper_with_provenance_factory(value, new_prov)
 
-        target["HPCARCH"] = hpcarch
+        # HPCARCH itself with derived provenance
+        target["HPCARCH"] = wrapper_with_provenance_factory(
+            hpcarch,
+            {
+                "yaml_file": "<derived:DEFAULT.HPCARCH>",
+                "line": 0,
+                "col": 0,
+                "category": "derived",
+                "operation": "copied_from_DEFAULT"
+            }
+        )
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
         project = hpcarch_data.get("SCRATCH_PROJECT_DIR", hpcarch_data.get("PROJECT", ""))
         user = hpcarch_data.get("USER", "")
 
         if scratch and project and user:
-            target["HPCROOTDIR"] = Path(scratch) / project / user / self.expid
-            target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
+            rootdir_path = Path(scratch) / project / user / self.expid
+            logdir_path = rootdir_path / f"LOG_{self.expid}"
+            
+            # Computed paths with provenance
+            target["HPCROOTDIR"] = wrapper_with_provenance_factory(
+                str(rootdir_path),
+                {
+                    "yaml_file": "<computed:HPCROOTDIR>",
+                    "line": 0,
+                    "col": 0,
+                    "category": "computed",
+                    "subcategory": "paths",
+                    "operation": "path_join",
+                    "computed_from": f"{scratch}/{project}/{user}/{self.expid}"
+                }
+            )
+            target["HPCLOGDIR"] = wrapper_with_provenance_factory(
+                str(logdir_path),
+                {
+                    "yaml_file": "<computed:HPCLOGDIR>",
+                    "line": 0,
+                    "col": 0,
+                    "category": "computed",
+                    "subcategory": "paths",
+                    "operation": "path_join"
+                }
+            )
         # Default local paths.
         elif hpcarch.upper() == "LOCAL":
-            target["HPCROOTDIR"] = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
-            target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
+            rootdir_path = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
+            logdir_path = rootdir_path / f"LOG_{self.expid}"
+            
+            target["HPCROOTDIR"] = wrapper_with_provenance_factory(
+                str(rootdir_path),
+                {
+                    "yaml_file": "<computed:HPCROOTDIR>",
+                    "line": 0,
+                    "col": 0,
+                    "category": "computed",
+                    "operation": "local_path_default"
+                }
+            )
+            target["HPCLOGDIR"] = wrapper_with_provenance_factory(
+                str(logdir_path),
+                {
+                    "yaml_file": "<computed:HPCLOGDIR>",
+                    "line": 0,
+                    "col": 0,
+                    "category": "computed",
+                    "operation": "local_path_default"
+                }
+            )
 
-        if target.get("HPCROOTDIR", None) and target.get("HPCLOGDIR", None):
-            target["HPCROOTDIR"] = str(target["HPCROOTDIR"])
-            target["HPCLOGDIR"] = str(target["HPCLOGDIR"])
+        # Convert Path objects to strings if needed (already done above with str())
+        # No conversion needed since we already wrapped strings
 
         self.substitute_dynamic_variables(target)
 
