@@ -35,12 +35,11 @@ from bscearth.utils.date import parse_date
 from configobj import ConfigObj
 from pyparsing import nestedExpr
 from ruamel.yaml import YAML
-from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, ListWithProvenance, dump_yaml, clean_provenance
+from yaml_provenance import ProvenanceConfig, configure as configure_provenance, DictWithProvenance, ListWithProvenance, dump_yaml, clean_provenance, wrapper_with_provenance_factory
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
 from autosubmit.log.log import Log, AutosubmitCritical, AutosubmitError
-
 
 class AutosubmitConfig(object):
     """Class to handle experiment configuration coming from a file or database.
@@ -2112,8 +2111,8 @@ class AutosubmitConfig(object):
         for name, value in hpcarch_data.items():
             # Try to get provenance from source value
             source_prov = None
-            if hasattr(value, '__provenance__'):
-                source_prov = get_provenance(value)
+            if hasattr(value, 'provenance'):
+                source_prov = value.provenance[-1]
             
             # Check if parent dict has provenance map
             if source_prov is None and hasattr(hpcarch_data, '_provenance_map') and name in hpcarch_data._provenance_map:
