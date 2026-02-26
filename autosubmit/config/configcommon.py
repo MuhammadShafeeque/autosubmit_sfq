@@ -45,13 +45,80 @@ from ruamel.yaml import YAML
 # independently. No container-level changes are needed here.
 # The flag is kept so get_value_provenance() can guard its behaviour, and
 # _ProvenanceJSONEncoder is used in get_full_config_as_json().
+#
+# _wrap_with_source() / _wrap_dict_with_source() annotate programmatically
+# injected values (BasicConfig props, environment vars, computed HPC params,
+# git commit) so they appear with meaningful comments in experiment_data.yml
+# instead of "# no provenance".
 # ---------------------------------------------------------------------------
 try:
-    from yaml_provenance._wrapper import ProvenanceClassForTheUnsubclassable as _PCSForUnsubclassable
+    from yaml_provenance._wrapper import (
+        ProvenanceClassForTheUnsubclassable as _PCSForUnsubclassable,
+        wrapper_with_provenance_factory as _wp_factory,
+    )
     _HAS_YAML_PROVENANCE = True
 except ImportError:
-    _PCSForUnsubclassable = None  # type: ignore[assignment,misc]
+    _PCSForUnsubclassable = None   # type: ignore[assignment,misc]
+    _wp_factory = None             # type: ignore[assignment,misc]
     _HAS_YAML_PROVENANCE = False
+
+
+def _wrap_with_source(value: Any, source: str) -> Any:
+    """Wrap *value* with a provenance annotation pointing to *source*.
+
+    Used to give meaningful provenance comments to values that are injected
+    programmatically (not loaded from a YAML file), such as BasicConfig
+    attributes, environment variables, computed HPC parameters, and git refs.
+
+    When yaml-provenance is not installed the value is returned unchanged so
+    the function is always safe to call unconditionally.
+
+    The *source* string is placed in the ``yaml_file`` field of the provenance
+    dict.  The ``dump_yaml`` formatter renders it as::
+
+        KEY: value  # <source>,line:0,col:0
+
+    Suggested *source* formats:
+    - ``"autosubmit.config.BasicConfig"``   — for BasicConfig.props() values
+    - ``"environment:$VAR_NAME"``           — for os.environ lookups
+    - ``"computed:PLATFORMS.ARCH.PARAM"``  — for HPC* derived values
+    - ``"git:<project_dir>/.git/HEAD"``    — for workflow commit
+    - ``"computed:BasicConfig.LOCAL_ROOT_DIR/<expid>"`` — for ROOTDIR/PROJDIR
+
+    :param value: The value to annotate.
+    :param source: Human-readable source description.
+    :return: Provenance-wrapped value, or the original value if the library
+        is unavailable.
+    """
+    if not _HAS_YAML_PROVENANCE or _wp_factory is None:
+        return value
+    provenance = {'yaml_file': source, 'line': 0, 'col': 0,
+                  'category': None, 'subcategory': None}
+    try:
+        return _wp_factory(value, provenance)
+    except Exception:
+        return value
+
+
+def _wrap_dict_with_source(d: dict, source: str) -> dict:
+    """Wrap every scalar leaf of *d* with *source* provenance in-place.
+
+    Recurses into nested dicts.  Leaves that already carry provenance (i.e.
+    WithProvenance instances) are left untouched so existing YAML-file
+    provenance is not overwritten.
+
+    :param d: Dict to annotate (modified in-place and returned).
+    :param source: Source description passed to :func:`_wrap_with_source`.
+    :return: The annotated dict.
+    """
+    if not _HAS_YAML_PROVENANCE:
+        return d
+    for key, value in d.items():
+        if isinstance(value, dict):
+            _wrap_dict_with_source(value, source)
+        elif not hasattr(value, 'provenance'):
+            d[key] = _wrap_with_source(value, source)
+    return d
 
 
 class _ProvenanceJSONEncoder(json.JSONEncoder):
@@ -69,6 +136,7 @@ class _ProvenanceJSONEncoder(json.JSONEncoder):
             # BoolWithProvenance.value → True/False; NoneWithProvenance.value → None
             return obj.value
         return super().default(obj)
+
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -1871,8 +1939,10 @@ class AutosubmitConfig(object):
         """
         for key, value in os.environ.items():
             if key.startswith("AS_ENV"):
-                parameters[key] = value
-        parameters["AS_ENV_CURRENT_USER"] = os.environ.get("SUDO_USER", os.environ.get("USER", None))
+                parameters[key] = _wrap_with_source(value, f"environment:${key}")
+        user = os.environ.get("SUDO_USER", os.environ.get("USER", None))
+        user_var = "SUDO_USER" if os.environ.get("SUDO_USER") else "USER"
+        parameters["AS_ENV_CURRENT_USER"] = _wrap_with_source(user, f"environment:${user_var}")
         return parameters
 
     def needs_reload(self) -> bool:
@@ -1935,10 +2005,19 @@ class AutosubmitConfig(object):
                 del self.experiment_data["AS_TEMP"]
             # IF expid and hpcarch are not defined, use the ones from the minimal.yml file
             self.deep_add_missing_starter_conf(self.experiment_data, starter_conf)
-            self.experiment_data['ROOTDIR'] = os.path.join(
-                BasicConfig.LOCAL_ROOT_DIR, self.expid)
-            self.experiment_data['PROJDIR'] = self.get_project_dir()
-            self.experiment_data.update(BasicConfig().props())
+            self.experiment_data['ROOTDIR'] = _wrap_with_source(
+                os.path.join(BasicConfig.LOCAL_ROOT_DIR, self.expid),
+                f"computed:BasicConfig.LOCAL_ROOT_DIR/{self.expid}",
+            )
+            self.experiment_data['PROJDIR'] = _wrap_with_source(
+                self.get_project_dir(),
+                f"computed:BasicConfig.LOCAL_ROOT_DIR/{self.expid}/proj",
+            )
+            # BasicConfig().props() reads from autosubmit.conf (~/.autosubmit/autosubmit.conf
+            # or /etc/autosubmit/autosubmit.conf) and injects operational paths and settings.
+            _bc_props = BasicConfig().props()
+            _wrap_dict_with_source(_bc_props, "autosubmit.config.BasicConfig")
+            self.experiment_data.update(_bc_props)
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
@@ -1991,11 +2070,15 @@ class AutosubmitConfig(object):
         project_dir = Path(self.get_project_dir())
         if project_dir.joinpath(".git").exists():
             with suppress(KeyError, ValueError, UnicodeDecodeError):
-                self.experiment_data["AUTOSUBMIT"]["WORKFLOW_COMMIT"] = subprocess.check_output(
+                commit = subprocess.check_output(
                     "git rev-parse HEAD",
                     cwd=project_dir,
                     shell=True
                 ).decode(locale.getpreferredencoding()).strip("\n")
+                self.experiment_data["AUTOSUBMIT"]["WORKFLOW_COMMIT"] = _wrap_with_source(
+                    commit,
+                    f"git:{project_dir}/.git/HEAD",
+                )
 
     def load_current_hpcarch_parameters(self, parameters: Optional[dict] = None) -> None:
         """Load custom HPCARCH parameters.
@@ -2009,25 +2092,38 @@ class AutosubmitConfig(object):
         target = parameters if parameters is not None else self.experiment_data
 
         for name, value in hpcarch_data.items():
-            target[f"HPC{name}"] = value
+            # Annotate each HPC* value with the platform section it was derived from.
+            # Values that already carry YAML-file provenance (WithProvenance) keep their
+            # original annotation; only bare values (programmatically computed ones) get
+            # a computed: source.
+            source = f"computed:PLATFORMS.{hpcarch}.{name}"
+            target[f"HPC{name}"] = _wrap_with_source(value, source) if not hasattr(value, 'provenance') else value
 
-        target["HPCARCH"] = hpcarch
+        target["HPCARCH"] = _wrap_with_source(hpcarch, f"computed:DEFAULT.HPCARCH")
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
         project = hpcarch_data.get("SCRATCH_PROJECT_DIR", hpcarch_data.get("PROJECT", ""))
         user = hpcarch_data.get("USER", "")
 
         if scratch and project and user:
-            target["HPCROOTDIR"] = Path(scratch) / project / user / self.expid
-            target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
+            rootdir = Path(scratch) / project / user / self.expid
+            target["HPCROOTDIR"] = rootdir
+            target["HPCLOGDIR"] = rootdir / f"LOG_{self.expid}"
         # Default local paths.
         elif hpcarch.upper() == "LOCAL":
-            target["HPCROOTDIR"] = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
-            target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
+            rootdir = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
+            target["HPCROOTDIR"] = rootdir
+            target["HPCLOGDIR"] = rootdir / f"LOG_{self.expid}"
 
         if target.get("HPCROOTDIR", None) and target.get("HPCLOGDIR", None):
-            target["HPCROOTDIR"] = str(target["HPCROOTDIR"])
-            target["HPCLOGDIR"] = str(target["HPCLOGDIR"])
+            target["HPCROOTDIR"] = _wrap_with_source(
+                str(target["HPCROOTDIR"]),
+                f"computed:PLATFORMS.{hpcarch}.SCRATCH_DIR+PROJECT+USER/{self.expid}",
+            )
+            target["HPCLOGDIR"] = _wrap_with_source(
+                str(target["HPCLOGDIR"]),
+                f"computed:HPCROOTDIR/LOG_{self.expid}",
+            )
 
         self.substitute_dynamic_variables(target)
 
