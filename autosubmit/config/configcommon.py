@@ -43,13 +43,32 @@ from ruamel.yaml import YAML
 # WithProvenance leaf values (StrWithProvenance, IntWithProvenance, etc.) are
 # transparent subclasses of their native types and carry provenance metadata
 # independently. No container-level changes are needed here.
-# The flag is kept so get_value_provenance() can guard its behaviour.
+# The flag is kept so get_value_provenance() can guard its behaviour, and
+# _ProvenanceJSONEncoder is used in get_full_config_as_json().
 # ---------------------------------------------------------------------------
 try:
-    import yaml_provenance as _yaml_provenance  # noqa: F401 — presence check only
+    from yaml_provenance._wrapper import ProvenanceClassForTheUnsubclassable as _PCSForUnsubclassable
     _HAS_YAML_PROVENANCE = True
 except ImportError:
+    _PCSForUnsubclassable = None  # type: ignore[assignment,misc]
     _HAS_YAML_PROVENANCE = False
+
+
+class _ProvenanceJSONEncoder(json.JSONEncoder):
+    """JSON encoder that handles yaml-provenance wrapper types.
+
+    ``BoolWithProvenance`` (and ``NoneWithProvenance``) are subclasses of
+    ``ProvenanceClassForTheUnsubclassable`` rather than ``bool`` / ``NoneType``,
+    so the standard json encoder doesn't recognise them.  This encoder handles
+    them explicitly.  All other WithProvenance types (StrWithProvenance,
+    IntWithProvenance, …) are genuine subclasses of their native types and are
+    handled transparently by the default encoder.
+    """
+    def default(self, obj):
+        if _PCSForUnsubclassable is not None and isinstance(obj, _PCSForUnsubclassable):
+            # BoolWithProvenance.value → True/False; NoneWithProvenance.value → None
+            return obj.value
+        return super().default(obj)
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -152,7 +171,7 @@ class AutosubmitConfig(object):
     def get_full_config_as_json(self):
         """Return config as json object"""
         try:
-            return json.dumps(self.experiment_data)
+            return json.dumps(self.experiment_data, cls=_ProvenanceJSONEncoder)
         except Exception as e:
             Log.warning(f"Autosubmit was not able to retrieve and save the configuration "
                         f"into the historical database: {str(e)}")
