@@ -33,20 +33,28 @@ from typing import Any, Optional, Union, Iterable
 
 from bscearth.utils.date import parse_date
 from configobj import ConfigObj
-from pyparsing import nestedExpr
+from pyparsing import nested_expr
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
-from yaml_provenance import (
-    ProvenanceConfig,
-    configure as configure_provenance,
-    clean_provenance,
-    ProvenanceTracker,
-    track_computed_parameter
-)
+
+# ---------------------------------------------------------------------------
+# Optional yaml-provenance integration
+# ---------------------------------------------------------------------------
+# When yaml-provenance is installed (see yamlparser.py for install notes)
+# ``DictWithProvenance`` is used as the output container of ``deep_normalize``
+# so that provenance is preserved at every nesting level, not just on leaf
+# values.  The library is an optional dependency; everything works without it.
+# ---------------------------------------------------------------------------
+try:
+    from yaml_provenance import DictWithProvenance as _DictWithProvenance
+    _HAS_YAML_PROVENANCE = True
+except ImportError:
+    _DictWithProvenance = None  # type: ignore[assignment,misc]
+    _HAS_YAML_PROVENANCE = False
 
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.config.yamlparser import YAMLParserFactory
 from autosubmit.log.log import Log, AutosubmitCritical, AutosubmitError
+
 
 class AutosubmitConfig(object):
     """Class to handle experiment configuration coming from a file or database.
@@ -87,22 +95,11 @@ class AutosubmitConfig(object):
         self._exp_parser_file = None
         self._conf_parser_file = None
         self.hpcarch = None
-        
-        # Configure yaml-provenance with category hierarchy
-        configure_provenance(ProvenanceConfig(
-            category_hierarchy=[None, "base", "custom_pre", "custom_post"],
-            track_history=False,  # Lightweight mode
-            on_conflict="warn"
-        ))
-        
-        # Initialize ProvenanceTracker (Registry Pattern)
-        self.provenance_tracker = ProvenanceTracker()
-        self.track_provenance = True  # Enable provenance comment generation
 
     @property
     def jobs_data(self) -> dict[str, Any]:
         try:
-            return clean_provenance(self.experiment_data["JOBS"])
+            return self.experiment_data["JOBS"]
         except KeyError:
             raise AutosubmitCritical(
                 "JOBS section not found in configuration file", 7014
@@ -113,7 +110,7 @@ class AutosubmitConfig(object):
     @property
     def platforms_data(self) -> dict[str, Any]:
         try:
-            return clean_provenance(self.experiment_data["PLATFORMS"])
+            return self.experiment_data["PLATFORMS"]
         except KeyError:
             raise AutosubmitCritical(
                 "PLATFORMS section not found in configuration file", 7014
@@ -155,40 +152,11 @@ class AutosubmitConfig(object):
     def get_full_config_as_json(self):
         """Return config as json object"""
         try:
-            return json.dumps(clean_provenance(self.experiment_data))
+            return json.dumps(self.experiment_data)
         except Exception as e:
             Log.warning(f"Autosubmit was not able to retrieve and save the configuration "
                         f"into the historical database: {str(e)}")
             return ""
-
-    def save(self, filepath: str) -> None:
-        """
-        Save experiment_data to YAML file with provenance comments.
-        
-        This method saves experiment_data to a YAML file with provenance
-        comments if tracking is enabled.
-        
-        :param filepath: Path to output YAML file
-        :type filepath: str
-        """
-        # Prepare data for saving
-        data_to_save = clean_provenance(self.experiment_data)
-        
-        # Add provenance comments if tracking is enabled
-        if self.track_provenance and hasattr(self, 'provenance_tracker'):
-            data_to_save = self._add_provenance_comments(data_to_save)
-        
-        # Use ruamel.yaml to dump data
-        yaml_dumper = YAML()
-        yaml_dumper.default_flow_style = False
-        yaml_dumper.preserve_quotes = True
-        
-        with open(filepath, 'w') as f:
-            yaml_dumper.dump(data_to_save, f)
-        
-        Log.info(f"[TRACE] save(): Saved configuration to {filepath}")
-
-
 
     def get_project_dir(self) -> str:
         """Returns experiment's project destination directory.
@@ -238,7 +206,7 @@ class AutosubmitConfig(object):
         current_level: Union[str, dict] = self.experiment_data.get(section[0], "")
         for param in section[1:]:
             if current_level:
-                if isinstance(current_level, dict):
+                if type(current_level) is dict:
                     current_level = current_level.get(param, d_value)
                 else:
                     if must_exists:
@@ -252,6 +220,48 @@ class AutosubmitConfig(object):
         if current_level is None or (not isinstance(current_level, numbers.Number) and len(current_level) == 0):
             return d_value
         return current_level
+
+    def get_value_provenance(self, section: list[str]) -> list[dict]:
+        """Return the provenance history of a configuration value.
+
+        This is a convenience wrapper around ``get_section`` that exposes the
+        ``yaml-provenance`` metadata attached to a leaf value.  Each entry in
+        the returned list is a dict of the form::
+
+            {'yaml_file': '/path/to/conf/expdef_a001.yml', 'line': 14, 'col': 8}
+
+        The *last* element is the current (winning) provenance; earlier entries
+        are present only when ``ProvenanceConfig(track_history=True)`` is set
+        (which is the default in ``yamlparser.py``).
+
+        Returns an empty list when the value is not found, when
+        ``yaml-provenance`` is not installed, or when the value is a plain
+        Python object without provenance metadata (e.g. a value that was
+        synthesised internally rather than read from a file).
+
+        Usage example::
+
+            as_conf = AutosubmitConfig("a001")
+            as_conf.reload()
+            prov = as_conf.get_value_provenance(["JOBS", "INI", "WALLCLOCK"])
+            # [{'yaml_file': '.../jobs_a001.yml', 'line': 14, 'col': 8}]
+
+        :param section: Dot-separated key path as a list, e.g.
+            ``["JOBS", "INI", "WALLCLOCK"]``.
+        :type section: list[str]
+        :return: List of provenance dicts (empty when unavailable).
+        :rtype: list[dict]
+        """
+        if not _HAS_YAML_PROVENANCE:
+            return []
+        value = self.get_section(section)
+        provenance = getattr(value, "provenance", None)
+        if provenance is None:
+            return []
+        # provenance may be a single Provenance object or a list; normalise.
+        if isinstance(provenance, list):
+            return [dict(p) for p in provenance]
+        return [dict(provenance)]
 
     def get_wchunkinc(self, section: str) -> str:
         """Gets the chunk increase to wallclock.
@@ -487,169 +497,46 @@ class AutosubmitConfig(object):
         If a value is a dictionary, it calls itself recursively to normalize the nested dictionary.
         If a value is a list, it iterates through the list and normalizes any dictionaries keys within it.
         Other types of values are added to the normalized dictionary as is.
-        
-        With tracker-based API, works with plain dicts (provenance tracked separately).
 
         :param data: The dictionary to normalize.
         :type data: dict[str, Any]
         :return: A new dictionary with all keys normalized to uppercase.
         :rtype: dict[str, Any]
         """
-        # With tracker-based API, work with plain dicts (provenance tracked separately)
-        normalized_data = dict()
-        for key, val in data.items():
-            normalized_key = str(key).upper()
-            if isinstance(val, collections.abc.Mapping):
-                normalized_data[normalized_key] = self.deep_normalize(val)
-            elif isinstance(val, list):
-                normalized_data[normalized_key] = self._deep_normalize_list(val)
-            else:
-                normalized_data[normalized_key] = val
+        # Use DictWithProvenance as the container when the library is available
+        # so section-level provenance survives normalisation.  Falls back to a
+        # plain dict transparently — callers only ever type-check against dict.
+        normalized_data = _DictWithProvenance() if _HAS_YAML_PROVENANCE else dict()
+        with suppress(Exception):
+            for key, val in data.items():
+                normalized_key = str(key).upper()
+                if isinstance(val, collections.abc.Mapping):
+                    normalized_data[normalized_key] = self.deep_normalize(val)
+                elif isinstance(val, list):
+                    normalized_list = []
+                    for item in val:
+                        if isinstance(item, collections.abc.Mapping):
+                            normalized_list.append(self.deep_normalize(item))
+                        else:
+                            normalized_list.append(item)
+                    normalized_data[normalized_key] = normalized_list
+                else:
+                    normalized_data[normalized_key] = val
         return normalized_data
-    
-    def _deep_normalize_list(self, lst: list) -> list:
-        """Helper to normalize lists (tracker-based API uses plain lists)."""
-        normalized_list = []
-        for item in lst:
-            if isinstance(item, collections.abc.Mapping):
-                normalized_list.append(self.deep_normalize(item))
-            else:
-                normalized_list.append(item)
-        return normalized_list
-    
-    def _reindex_provenance_after_loading(self):
-        """Re-index provenance entries after all configuration loading.
-        
-        After deep_update, normalization, and merging, parameters may be tracked
-        with shorter paths (e.g., "MARENOSTRUM5.HOST") but need to be accessible
-        by their full paths in experiment_data (e.g., "PLATFORMS.MARENOSTRUM5.HOST").
-        
-        This method walks experiment_data and ensures all parameters are properly
-        indexed in the provenance tracker with their final key paths.
-        """
-        if not hasattr(self, 'provenance_tracker'):
-            return
-        
-        def walk_and_reindex(data, path=""):
-            """Recursively walk data structure and re-index provenance."""
-            if not isinstance(data, dict):
-                return
-            
-            for key, value in data.items():
-                current_path = f"{path}.{key}" if path else key
-                
-                if isinstance(value, dict):
-                    # Recursively handle nested dicts
-                    walk_and_reindex(value, current_path)
-                elif isinstance(value, list):
-                    # Skip lists - provenance is tracked for the list itself, not items
-                    pass
-                elif value != "":
-                    # Scalar value: check if provenance exists at current path
-                    prov_entry = self.provenance_tracker.get(current_path)
-                    
-                    if prov_entry is None:
-                        # Try to find provenance at shorter paths
-                        # E.g., if current_path is "PLATFORMS.MARENOSTRUM5.HOST",
-                        # try "MARENOSTRUM5.HOST", then "HOST"
-                        path_parts = current_path.split(".")
-                        for i in range(1, len(path_parts)):
-                            shorter_path = ".".join(path_parts[i:])
-                            prov_entry = self.provenance_tracker.get(shorter_path)
-                            if prov_entry:
-                                # Found provenance at shorter path, re-register at full path
-                                self.provenance_tracker.track(
-                                    current_path,
-                                    value,
-                                    prov_entry.file,
-                                    prov_entry.line,
-                                    prov_entry.col
-                                )
-                                break
-        
-        # Walk the entire experiment_data structure
-        walk_and_reindex(self.experiment_data)
-    
-    def _retrack_after_merge(self, data, prefix="", source_data=None):
-        """Re-track provenance after dictionary merging.
-        
-        When deep_update() merges dictionaries, it creates NEW dict objects
-        without preserving provenance. This method walks the merged structure
-        and re-registers provenance from the source data.
-        
-        :param data: The merged dictionary to re-track
-        :param prefix: Current key path prefix (e.g., "PLATFORMS.MARENOSTRUM5")
-        :param source_data: Original source data to query for provenance
-        """
-        if not hasattr(self, 'provenance_tracker'):
-            return
-        
-        if source_data is None:
-            source_data = data
-        
-        for key, value in data.items():
-            # Build the full key path
-            current_path = f"{prefix}.{key}" if prefix else key
-            
-            # Try to find provenance for this parameter in the tracker
-            prov_entry = self.provenance_tracker.get(current_path)
-            
-            if prov_entry is None:
-                # Try without prefix (might be tracked from original file)
-                prov_entry = self.provenance_tracker.get(key)
-            
-            if isinstance(value, dict):
-                # Recursively re-track nested dictionaries
-                self._retrack_after_merge(value, current_path, source_data)
-            elif not isinstance(value, (dict, list)) and value != "" and prov_entry:
-                # Re-track scalar values that had provenance
-                self.provenance_tracker.track(
-                    current_path,
-                    value,
-                    prov_entry.file,
-                    prov_entry.line,
-                    prov_entry.col
-                )
 
     def deep_update(self, unified_config, new_dict):
         """Update a nested dictionary or similar mapping.
-        Modify ``unified_config`` in place.
-        With tracker-based API, works with plain dicts (provenance tracked separately).
+        Modify ``source`` in place.
         """
-        # Ensure we're working with dicts
         if not isinstance(unified_config, collections.abc.Mapping):
             unified_config = {}
-        
-        # Initialize keys from new_dict in unified_config
         for key in new_dict.keys():
             if key not in unified_config:
                 unified_config[key] = ""
-        
-        # Update recursively
         for key, val in new_dict.items():
             if isinstance(val, collections.abc.Mapping):
-                # Recursive merge for nested dicts
                 tmp = self.deep_update(unified_config.get(key, {}), val)
                 unified_config[key] = tmp
-                
-                # CRITICAL FIX: Re-track provenance after merge
-                # Query tracker for provenance from new_dict and re-register
-                # under the merged structure's key paths
-                for nested_key, nested_val in tmp.items():
-                    if not isinstance(nested_val, (dict, list)):
-                        # Try to find provenance from new_dict
-                        source_path = f"{key}.{nested_key}"
-                        prov_entry = self.provenance_tracker.get(source_path)
-                        if prov_entry and hasattr(self, 'provenance_tracker'):
-                            # Re-track under the unified_config path
-                            target_path = f"{key}.{nested_key}"
-                            self.provenance_tracker.track(
-                                target_path,
-                                nested_val,
-                                prov_entry.file,
-                                prov_entry.line,
-                                prov_entry.col
-                            )
             elif isinstance(val, list):
                 if len(val) > 0 and isinstance(val[0], collections.abc.Mapping):
                     unified_config[key] = val
@@ -658,21 +545,7 @@ class AutosubmitConfig(object):
                     if current_list != val:
                         unified_config[key] = val
             else:
-                # For scalar values
                 unified_config[key] = new_dict[key]
-                
-                # CRITICAL FIX: Preserve provenance for scalar values
-                prov_entry = self.provenance_tracker.get(key)
-                if prov_entry and hasattr(self, 'provenance_tracker'):
-                    # Re-track scalar value to ensure provenance is preserved
-                    self.provenance_tracker.track(
-                        key,
-                        new_dict[key],
-                        prov_entry.file,
-                        prov_entry.line,
-                        prov_entry.col
-                    )
-        
         return unified_config
 
     def normalize_variables(self, data: dict, must_exists: bool, raise_exception: bool = False) -> dict:
@@ -781,7 +654,7 @@ class AutosubmitConfig(object):
         """
         notify_on = data_fixed["JOBS"][job_section].get("NOTIFY_ON", "")
         if notify_on:
-            if isinstance(notify_on, str):
+            if type(notify_on) is str:
                 if "," in notify_on:
                     notify_on = notify_on.split(",")
                 else:
@@ -797,7 +670,7 @@ class AutosubmitConfig(object):
                 custom_directives = job_data.get("CUSTOM_DIRECTIVES", "")
                 if isinstance(custom_directives, list):
                     custom_directives = str(custom_directives)
-                if isinstance(custom_directives, str):
+                if type(custom_directives) is str:
                     data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = str(custom_directives)
                 else:
                     data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = custom_directives
@@ -858,7 +731,7 @@ class AutosubmitConfig(object):
         elif isinstance(dependencies, dict):
             for dependency, dependency_data in dependencies.items():
                 aux_dependencies[dependency.upper()] = dependency_data
-                if isinstance(dependency_data, dict) and dependency_data.get("STATUS", None):
+                if type(dependency_data) is dict and dependency_data.get("STATUS", None):
                     dependency_data["STATUS"] = dependency_data["STATUS"].upper()
                     if not dependency_data.get("ANY_FINAL_STATUS_IS_VALID", False):
                         if dependency_data["STATUS"][-1] == "?":
@@ -874,7 +747,7 @@ class AutosubmitConfig(object):
 
     @staticmethod
     def _normalize_files(files: Union[str, list[str]]) -> list[str]:
-        if not isinstance(files, list):
+        if type(files) is not list:
             if ',' in files:
                 files = files.split(",")
             elif ' ' in files:
@@ -898,7 +771,7 @@ class AutosubmitConfig(object):
     def convert_list_to_string(self, data):
         """Convert a list to a string
         """
-        if isinstance(data, dict):
+        if type(data) is dict:
             for key, val in data.items():
                 if isinstance(val, list):
                     data[key] = ",".join(val)
@@ -906,30 +779,20 @@ class AutosubmitConfig(object):
                     self.convert_list_to_string(data[key])
         return data
 
-    def load_config_file(self, current_folder_data, yaml_file, load_misc=False, category=None):
-        """Load a config file and parse it with provenance tracking (3-point strategy)
+    def load_config_file(self, current_folder_data, yaml_file, load_misc=False):
+        """Load a config file and parse it
         :param current_folder_data: current folder data
         :param yaml_file: yaml file to load
         :param load_misc: Whether to load misc files or not
-        :param category: Provenance category for this file (base, custom_pre, custom_post, or None)
         :return: unified config file
         """
 
-        # Determine category if not provided
-        if category is None:
-            category = self._determine_category(yaml_file)
+        # check if path is file o folder
+        # load yaml file with ruamel.yaml
 
-        # Load the file with tracker-based API
-        new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file, category=category)
-        
-        # Merge parser's tracker into main tracker (tracker-based API)
-        if hasattr(new_file, 'tracker'):
-            self.provenance_tracker.merge(new_file.tracker)
-        
-        # NORMALIZATION (creates new dicts, strips .lc metadata)
-        # No need to .copy() since parser.load() returns fresh data and normalize_variables creates a new dict
-        new_file.data = self.normalize_variables(new_file.data,
-                                                 must_exists=False)
+        new_file = AutosubmitConfig.get_parser(self.parser_factory, yaml_file)
+        new_file.data = self.normalize_variables(new_file.data.copy(),
+                                                 must_exists=False)  # TODO Figure out why this .copy is needed
         if new_file.data.get("DEFAULT", {}).get("CUSTOM_CONFIG", None) is not None:
             new_file.data["DEFAULT"]["CUSTOM_CONFIG"] = self.convert_list_to_string(
                 new_file.data["DEFAULT"]["CUSTOM_CONFIG"])
@@ -937,27 +800,7 @@ class AutosubmitConfig(object):
             self.misc_files.append(yaml_file)
             new_file.data = {}
         self._delete_autosubmit_calculated_variables(new_file.data)
-        
-        # MERGE with current data
-        unified_result = self.unify_conf(current_folder_data, new_file.data)
-        
-        return unified_result
-    
-    def _determine_category(self, file_path):
-        """Determine provenance category based on file location
-        
-        :param file_path: Path to the file being loaded
-        :return: Category string ("base", "custom_pre", "custom_post", or None)
-        """
-        file_path_str = str(file_path)
-        
-        # Check if it's in the experiment conf directory (base config)
-        if f"/{self.expid}/conf/" in file_path_str and "CUSTOM_CONFIG" not in file_path_str:
-            return "base"
-        
-        # For custom configs, return None here - will be set explicitly when loading
-        # This allows the load_custom_config methods to specify the correct category
-        return None
+        return self.unify_conf(current_folder_data, new_file.data)
 
     # noinspection PyMethodMayBeStatic
     def get_yaml_filenames_to_load(self, yaml_folder, ignore_minimal=False):
@@ -978,16 +821,15 @@ class AutosubmitConfig(object):
                 filenames_to_load.append(str(yaml_file))
         return filenames_to_load
 
-    def load_config_folder(self, current_data, yaml_folder, ignore_minimal=False, category=None):
+    def load_config_folder(self, current_data, yaml_folder, ignore_minimal=False):
         """Load a config folder and return pre and post config
         :param current_data: current data to be updated
         :param yaml_folder: folder to load config
         :param ignore_minimal: ignore minimal config files
-        :param category: Provenance category for files in this folder
         :return: pre and post config
         """
         filenames_to_load = self.get_yaml_filenames_to_load(yaml_folder, ignore_minimal)
-        return self.load_custom_config(current_data, filenames_to_load, category=category)
+        return self.load_custom_config(current_data, filenames_to_load)
 
     def parse_custom_conf_directive(self, custom_conf_directive: Optional[Union[str, dict]]):
         filenames_to_load = dict()
@@ -995,8 +837,8 @@ class AutosubmitConfig(object):
         filenames_to_load["POST"] = []
         if custom_conf_directive is not None:
             # Check if directive is a dictionary
-            if not isinstance(custom_conf_directive, dict):
-                if isinstance(custom_conf_directive, str) and custom_conf_directive != "":
+            if type(custom_conf_directive) is not dict:
+                if type(custom_conf_directive) is str and custom_conf_directive != "":
                     if ',' in custom_conf_directive:
                         filenames_to_load["PRE"] = custom_conf_directive.split(',')
                     else:
@@ -1562,7 +1404,7 @@ class AutosubmitConfig(object):
             if parser_data["CONFIG"].get('TOTALJOBS', -1) == -1:
                 self.wrong_config["Autosubmit"] += [['config',
                                                      "TOTALJOBS parameter not found or non-integer"]]
-            if not isinstance(parser_data["CONFIG"].get('RETRIALS', 0), int):
+            if type(parser_data["CONFIG"].get('RETRIALS', 0)) is not int:
                 parser_data["CONFIG"]['RETRIALS'] = int(parser_data["CONFIG"].get('RETRIALS', 0))
 
         if parser_data.get("STORAGE", None) is None:
@@ -1576,7 +1418,7 @@ class AutosubmitConfig(object):
         if parser_data.get("MAIL", "") != "":
             if str(parser_data["MAIL"].get("NOTIFICATIONS", "false")).lower() == "true":
                 mails = parser_data["MAIL"].get("TO", "")
-                if isinstance(mails, list):
+                if type(mails) is list:
                     pass
                 elif "," in mails:
                     mails = mails.split(',')
@@ -1675,7 +1517,7 @@ class AutosubmitConfig(object):
 
             dependencies = section_data.get('DEPENDENCIES', '')
             if dependencies != "":
-                if isinstance(dependencies, dict):
+                if type(dependencies) is dict:
                     for dependency, values in dependencies.items():
                         if '-' in dependency:
                             dependency = dependency.split('-')[0]
@@ -1739,11 +1581,11 @@ class AutosubmitConfig(object):
                 self.wrong_config["Expdef"] += [['DEFAULT', "Mandatory EXPERIMENT.MEMBERS parameter is invalid"]]
             if parser['EXPERIMENT'].get('CHUNKSIZEUNIT', "").lower() not in ['year', 'month', 'day', 'hour']:
                 self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CHUNKSIZEUNIT choice is invalid"]]
-            if not isinstance(parser['EXPERIMENT'].get('CHUNKSIZE', "-1"), int):
+            if type(parser['EXPERIMENT'].get('CHUNKSIZE', "-1")) not in [int]:
                 if parser['EXPERIMENT']['CHUNKSIZE'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CHUNKSIZE is not defined"]]
                 parser['EXPERIMENT']['CHUNKSIZE'] = int(parser['EXPERIMENT']['CHUNKSIZE'])
-            if not isinstance(parser['EXPERIMENT'].get('NUMCHUNKS', "-1"), int):
+            if type(parser['EXPERIMENT'].get('NUMCHUNKS', "-1")) not in [int]:
                 if parser['EXPERIMENT']['NUMCHUNKS'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.NUMCHUNKS is not defined"]]
                 parser['EXPERIMENT']['NUMCHUNKS'] = int(parser['EXPERIMENT']['NUMCHUNKS'])
@@ -1805,7 +1647,7 @@ class AutosubmitConfig(object):
             wrappers = {}
         for wrapper_name, wrapper_values in wrappers.items():
             # continue if it is a global option (non-dicT)
-            if not isinstance(wrapper_values, dict):
+            if type(wrapper_values) is not dict:
                 continue
             jobs_in_wrapper = wrapper_values.get('JOBS_IN_WRAPPER', [])
             for section in jobs_in_wrapper:
@@ -1888,11 +1730,10 @@ class AutosubmitConfig(object):
         for key in keys_to_delete:
             yaml_data.pop(key, None)
 
-    def load_custom_config(self, current_data, filenames_to_load, category=None):
-        """Loads custom config files with provenance tracking
+    def load_custom_config(self, current_data, filenames_to_load):
+        """Loads custom config files
         :param current_data: dict with current data
         :param filenames_to_load: list of filenames to load
-        :param category: Provenance category ("custom_pre" or "custom_post")
         :return: current_data_pre,current_data_post with unified data
 
         """
@@ -1918,13 +1759,13 @@ class AutosubmitConfig(object):
                 # Load a folder or a file
                 if not filename.is_file():
                     # Load a folder by calling recursively to this function as a list of files
-                    current_data_pre, current_data_post = self.load_config_folder(copy.deepcopy(current_data), filename, category=category)
+                    current_data_pre, current_data_post = self.load_config_folder(copy.deepcopy(current_data), filename)
                     current_data = self.unify_conf(current_data_pre, current_data)
                     current_data = self.unify_conf(current_data, current_data_post)
                 else:
                     # Load a file and unify the current_data with the loaded data
                     current_data = self.unify_conf(current_data,
-                                                   self.load_config_file(current_data, filename, category=category))
+                                                   self.load_config_file(current_data, filename))
                     # Load next level if any
                     custom_conf_directive = current_data.get('DEFAULT', {}).get('CUSTOM_CONFIG', None)
                     filenames_to_load_level = self.parse_custom_conf_directive(custom_conf_directive)
@@ -1938,8 +1779,7 @@ class AutosubmitConfig(object):
                         current_data_pre = self.unify_conf(current_data_pre,
                                                            self.load_custom_config_section(copy.deepcopy(current_data),
                                                                                            filenames_to_load_level[
-                                                                                               "PRE"],
-                                                                                           category="custom_pre"))
+                                                                                               "PRE"]))
                     else:
                         current_data_pre = current_data
                     current_data = self.unify_conf(current_data_pre, current_data)
@@ -1949,8 +1789,7 @@ class AutosubmitConfig(object):
                                                                                                self.load_custom_config_section(
                                                                                                    current_data,
                                                                                                    filenames_to_load_level[
-                                                                                                       "POST"],
-                                                                                                   category="custom_post")))
+                                                                                                       "POST"])))
                     else:
                         current_data_post = current_data
 
@@ -1958,16 +1797,15 @@ class AutosubmitConfig(object):
             del current_data_aux
         return current_data_pre, current_data_post
 
-    def load_custom_config_section(self, current_data, filenames_to_load, category=None) -> dict:
-        """Loads a section (PRE or POST), simple str are also PRE data of the custom config files
+    def load_custom_config_section(self, current_data, filenames_to_load) -> dict:
+        """Loads a section (PRE or POST ), simple str are also PRE data of the custom config files
 
         :param current_data: data until now
         :param filenames_to_load: files to load in this section
-        :param category: Provenance category ("custom_pre" or "custom_post")
         :return: unified configuration.
         """
         # This is a recursive call
-        current_data_pre, current_data_post = self.load_custom_config(current_data, filenames_to_load, category=category)
+        current_data_pre, current_data_post = self.load_custom_config(current_data, filenames_to_load)
         # Unifies all ``pre`` and ``post`` data.
         # Think of it as a tree with two branches that needs to be unified at each level
         return self.unify_conf(self.unify_conf(current_data_pre, current_data), current_data_post)
@@ -1977,12 +1815,12 @@ class AutosubmitConfig(object):
         :param parameter:
         :return: list
         """
-        if isinstance(self.starter_conf[parameter], str):
+        if type(self.starter_conf[parameter]) is str:
             if "," in self.starter_conf[parameter]:
                 list_parameters = self.starter_conf[parameter].split(",")
             else:
                 list_parameters = [self.starter_conf[parameter]]
-        elif isinstance(self.starter_conf[parameter], list):
+        elif type(self.starter_conf[parameter]) is list:
             list_parameters = self.starter_conf[parameter]
         else:
             list_parameters = list(self.starter_conf[parameter])
@@ -2011,17 +1849,10 @@ class AutosubmitConfig(object):
         :param parameters: current loaded parameters.
         :return: dict
         """
-        # Note: This is a static method so we can't access self.provenance_tracker
-        # Provenance for AS_ENV_* variables should be tracked by the caller
-        
         for key, value in os.environ.items():
             if key.startswith("AS_ENV"):
                 parameters[key] = value
-        
-        current_user = os.environ.get("SUDO_USER", os.environ.get("USER", None))
-        if current_user:
-            parameters["AS_ENV_CURRENT_USER"] = current_user
-        
+        parameters["AS_ENV_CURRENT_USER"] = os.environ.get("SUDO_USER", os.environ.get("USER", None))
         return parameters
 
     def needs_reload(self) -> bool:
@@ -2056,18 +1887,6 @@ class AutosubmitConfig(object):
             for filename in self.get_yaml_filenames_to_load(self.conf_folder_yaml):
                 starter_conf = self.unify_conf(starter_conf, self.load_config_file(starter_conf, Path(filename)))
             starter_conf = self.load_as_env_variables(starter_conf)
-            
-            # POINT 3: Track AS_ENV_* variables (computed from environment)
-            for key, value in starter_conf.items():
-                if key.startswith("AS_ENV"):
-                    track_computed_parameter(
-                        self.provenance_tracker,
-                        key,
-                        value,
-                        f"<environment:{key}>",
-                        category="environment"
-                    )
-            
             starter_conf = self.load_common_parameters(starter_conf)
             self.starter_conf = starter_conf
             # Same data without the minimal config ( if any ), need to be here due to current_loaded_files variable
@@ -2084,10 +1903,10 @@ class AutosubmitConfig(object):
                 starter_conf.get("DEFAULT", {}).get("CUSTOM_CONFIG", None))
             if not only_experiment_data:
                 # Loads all configuration associated with the project data "pre"
-                custom_conf_pre = self.load_custom_config_section({}, filenames_to_load["PRE"], category="custom_pre")
+                custom_conf_pre = self.load_custom_config_section({}, filenames_to_load["PRE"])
                 # Loads all configuration associated with the user data "post"
                 self.experiment_data = self.load_custom_config_section(
-                    self.unify_conf(custom_conf_pre, non_minimal_conf), filenames_to_load["POST"], category="custom_post")
+                    self.unify_conf(custom_conf_pre, non_minimal_conf), filenames_to_load["POST"])
             else:
                 self.experiment_data = starter_conf
             ###
@@ -2096,53 +1915,14 @@ class AutosubmitConfig(object):
                 del self.experiment_data["AS_TEMP"]
             # IF expid and hpcarch are not defined, use the ones from the minimal.yml file
             self.deep_add_missing_starter_conf(self.experiment_data, starter_conf)
-            
-            # Track computed parameters
             self.experiment_data['ROOTDIR'] = os.path.join(
                 BasicConfig.LOCAL_ROOT_DIR, self.expid)
             self.experiment_data['PROJDIR'] = self.get_project_dir()
-            
-            # Track ROOTDIR and PROJDIR as computed
-            track_computed_parameter(
-                self.provenance_tracker,
-                "ROOTDIR",
-                self.experiment_data['ROOTDIR'],
-                "computed:LOCAL_ROOT_DIR/EXPID",
-                category="computed"
-            )
-            track_computed_parameter(
-                self.provenance_tracker,
-                "PROJDIR",
-                self.experiment_data['PROJDIR'],
-                "computed:PROJECT_DESTINATION",
-                category="computed"
-            )
-            
-            # Load BasicConfig properties and track them
-            basic_config_props = BasicConfig().props()
-            for key, value in basic_config_props.items():
-                self.experiment_data[key] = value
-                # Track BasicConfig properties as system-provided
-                track_computed_parameter(
-                    self.provenance_tracker,
-                    key,
-                    value,
-                    f"<system:BasicConfig.{key}>",
-                    category="system"
-                )
+            self.experiment_data.update(BasicConfig().props())
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
             self._add_autosubmit_dict()
-            
-            # CRITICAL FIX: Re-index provenance after all transformations
-            # After deep_update, normalization, and variable substitution, some
-            # parameters may have lost their provenance tracking. Walk the entire
-            # experiment_data structure and ensure all tracked parameters are
-            # accessible by their final key paths.
-            if hasattr(self, 'provenance_tracker'):
-                self._reindex_provenance_after_loading()
-            
             self.misc_data = {}
             self.misc_files = list(set(self.misc_files))
             for filename in self.misc_files:
@@ -2208,302 +1988,31 @@ class AutosubmitConfig(object):
 
         target = parameters if parameters is not None else self.experiment_data
 
-        # Copy HPC parameters
         for name, value in hpcarch_data.items():
             target[f"HPC{name}"] = value
-            
-            # Track as derived parameter
-            track_computed_parameter(
-                self.provenance_tracker,
-                f"HPC{name}",
-                value,
-                f"derived:PLATFORMS.{hpcarch}.{name}",
-                category="derived"
-            )
 
-        # HPCARCH itself
         target["HPCARCH"] = hpcarch
-        track_computed_parameter(
-            self.provenance_tracker,
-            "HPCARCH",
-            hpcarch,
-            "derived:DEFAULT.HPCARCH",
-            category="derived"
-        )
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
         project = hpcarch_data.get("SCRATCH_PROJECT_DIR", hpcarch_data.get("PROJECT", ""))
         user = hpcarch_data.get("USER", "")
 
         if scratch and project and user:
-            rootdir_path = Path(scratch) / project / user / self.expid
-            logdir_path = rootdir_path / f"LOG_{self.expid}"
-            
-            # Computed paths
-            target["HPCROOTDIR"] = str(rootdir_path)
-            track_computed_parameter(
-                self.provenance_tracker,
-                "HPCROOTDIR",
-                str(rootdir_path),
-                f"computed:{scratch}/{project}/{user}/{self.expid}",
-                category="computed"
-            )
-            
-            target["HPCLOGDIR"] = str(logdir_path)
-            track_computed_parameter(
-                self.provenance_tracker,
-                "HPCLOGDIR",
-                str(logdir_path),
-                f"computed:HPCROOTDIR/LOG_{self.expid}",
-                category="computed"
-            )
+            target["HPCROOTDIR"] = Path(scratch) / project / user / self.expid
+            target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
         # Default local paths.
         elif hpcarch.upper() == "LOCAL":
-            rootdir_path = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
-            logdir_path = rootdir_path / f"LOG_{self.expid}"
-            
-            target["HPCROOTDIR"] = str(rootdir_path)
-            track_computed_parameter(
-                self.provenance_tracker,
-                "HPCROOTDIR",
-                str(rootdir_path),
-                "computed:LOCAL_ROOT_DIR/EXPID/LOCAL_TMP_DIR",
-                category="computed"
-            )
-            
-            target["HPCLOGDIR"] = str(logdir_path)
-            track_computed_parameter(
-                self.provenance_tracker,
-                "HPCLOGDIR",
-                str(logdir_path),
-                "computed:HPCROOTDIR/LOG_EXPID",
-                category="computed"
-            )
+            target["HPCROOTDIR"] = Path(BasicConfig.LOCAL_ROOT_DIR) / self.expid / BasicConfig.LOCAL_TMP_DIR
+            target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
+
+        if target.get("HPCROOTDIR", None) and target.get("HPCLOGDIR", None):
+            target["HPCROOTDIR"] = str(target["HPCROOTDIR"])
+            target["HPCLOGDIR"] = str(target["HPCLOGDIR"])
 
         self.substitute_dynamic_variables(target)
 
-    def _format_registry_comment(self, prov: dict) -> str:
-        """
-        Format provenance registry entry as YAML comment.
-        
-        :param prov: Provenance dict from registry
-        :return: Formatted comment string
-        """
-        yaml_file = prov.get("yaml_file", "<unknown>")
-        line = prov.get("line")
-        col = prov.get("col")
-        category = prov.get("category")
-        hierarchical_path = prov.get("hierarchical_path", "")
-        operation = prov.get("operation", "")
-        
-        # Format based on available info
-        parts = [f"Source: {yaml_file}"]
-        
-        if line is not None and col is not None:
-            # Full provenance: file, line, col
-            parts.append(f"line:{line},col:{col}")
-        elif line is not None:
-            parts.append(f"line:{line}")
-        
-        if category:
-            parts.append(f"category:{category}")
-        
-        if operation == "computed":
-            # Mark as computed
-            parts.append("(computed)")
-        elif operation == "copied_as_HPC_param":
-            # Mark as copied from platform
-            derived_from = prov.get("derived_from", "")
-            if derived_from:
-                parts.append(f"[{derived_from}] (copied as HPC param)")
-        
-        if hierarchical_path and operation != "copied_as_HPC_param":
-            parts.append(f"[{hierarchical_path}]")
-        
-        return "# " + " ".join(parts)
-
-    def _inject_registry_provenance(self, yaml_file_path: str) -> None:
-        """
-        Post-process YAML file to replace '# no provenance' with registry info.
-        
-        Tracks hierarchical paths by parsing YAML structure and replaces
-        '# no provenance' comments with actual provenance from the registry.
-        
-        :param yaml_file_path: Path to experiment_data.yml
-        """
-        import re
-        import sys
-        
-        # Read YAML content
-        with open(yaml_file_path, 'r') as f:
-            lines = f.readlines()
-        
-        modified_lines = []
-        current_path = []  # Track hierarchical path as we parse
-        indent_stack = [-1]  # Track indentation levels, start with -1 for root
-        replacements_made = 0
-        
-        for line_num, line in enumerate(lines, 1):
-            # Track section hierarchy based on indentation
-            stripped = line.lstrip()
-            if not stripped or stripped.startswith('#'):
-                # Empty line or comment-only line
-                modified_lines.append(line)
-                continue
-            
-            current_indent = len(line) - len(stripped)
-            
-            # Update path stack based on indentation
-            while indent_stack and current_indent <= indent_stack[-1]:
-                indent_stack.pop()
-                if current_path:
-                    current_path.pop()
-            
-            # Check if this is a key line (contains ':')
-            if ':' in stripped:
-                # Extract key (before the colon)
-                key_match = re.match(r'^([A-Za-z0-9_-]+):', stripped)
-                if key_match:
-                    key = key_match.group(1)
-                    
-                    # Check if this is a mapping key (no value after colon or nested content)
-                    rest_of_line = stripped[key_match.end():].strip()
-                    is_mapping_key = not rest_of_line or rest_of_line.startswith('#')
-                    
-                    if is_mapping_key:
-                        # This is a section/mapping key, add to path
-                        current_path.append(key)
-                        indent_stack.append(current_indent)
-                        modified_lines.append(line)
-                    else:
-                        # This is a key-value pair, check for '# no provenance'
-                        if '# no provenance' in line:
-                            # Build hierarchical key
-                            hierarchical_key = '.'.join(current_path + [key])
-                            
-                            # Look up in provenance tracker
-                            if hierarchical_key in self.provenance_tracker.provenance_map:
-                                prov_entry = self.provenance_tracker.provenance_map[hierarchical_key]
-                                # Convert ProvEntry to dict for formatting
-                                prov = {
-                                    "yaml_file": prov_entry.file,
-                                    "line": prov_entry.line,
-                                    "col": prov_entry.col,
-                                    "category": prov_entry.category,
-                                    "hierarchical_path": hierarchical_key,
-                                    "operation": "computed" if prov_entry.category == "computed" else ""
-                                }
-                                comment = self._format_registry_comment(prov)
-                                
-                                # Replace '# no provenance' with registry comment
-                                new_line = line.replace('# no provenance', comment)
-                                modified_lines.append(new_line)
-                                replacements_made += 1
-                                
-                                if replacements_made <= 5:  # Log first few replacements
-                                    print(f"[INJECT] Replaced line {line_num}: {hierarchical_key}", file=sys.stderr, flush=True)
-                            else:
-                                # Not in registry, keep original
-                                modified_lines.append(line)
-                        else:
-                            # No '# no provenance', keep original
-                            modified_lines.append(line)
-                else:
-                    # Not a standard key, keep original
-                    modified_lines.append(line)
-            else:
-                # No colon, likely a list item or continuation
-                modified_lines.append(line)
-        
-        # Write back modified content
-        with open(yaml_file_path, 'w') as f:
-            f.writelines(modified_lines)
-        
-        print(f"[INJECT] Registry injection complete: {replacements_made} replacements made", file=sys.stderr, flush=True)
-
-    def _add_provenance_comments(self, data: dict, prefix: str = "") -> CommentedMap:
-        """Add inline provenance comments to configuration data.
-        
-        Recursively walks through the configuration dictionary and adds
-        end-of-line comments showing the source file for each parameter.
-        
-        Args:
-            data: Dictionary to annotate with comments
-            prefix: Dot-separated path prefix for nested keys
-            
-        Returns:
-            CommentedMap with provenance comments attached
-            
-        Example:
-            Output in YAML:
-            DEFAULT:
-              EXPID: a000  # Source: /path/to/minimal.yml line:10,col:3 [DEFAULT.EXPID]
-              HPCARCH: nord3v2  # Source: /path/to/main.yml line:15,col:5 [DEFAULT.HPCARCH]
-        """
-        # Create CommentedMap and check if tracking is enabled
-        if not self.track_provenance or not self.provenance_tracker:
-            return CommentedMap(data)
-        
-        # Process all items and build CommentedMap with proper nesting
-        commented_data = CommentedMap()
-        comments_added = 0
-        
-        for key, value in data.items():
-            param_path = f"{prefix}.{key}" if prefix else key
-            
-            # Get provenance for this parameter
-            prov_entry = self.provenance_tracker.get(param_path)
-            
-            if isinstance(value, dict):
-                # Recursively process nested dictionaries
-                commented_data[key] = self._add_provenance_comments(value, param_path)
-                # Add comment for the section itself if it has provenance
-                if prov_entry:
-                    source = prov_entry.file
-                    if prov_entry.line:
-                        source = f"{source} line:{prov_entry.line}"
-                        if prov_entry.col:
-                            source = f"{source},col:{prov_entry.col}"
-                    # Add category to comment if available
-                    if prov_entry.category:
-                        source = f"{source} (category:{prov_entry.category})"
-                    source = f"{source} [{param_path}]"
-                    try:
-                        commented_data.yaml_add_eol_comment(f"From: {source}", key)
-                        comments_added += 1
-                        Log.debug(f"[PROV] Added section comment: {param_path}")
-                    except Exception as e:
-                        Log.warning(f"[PROV] Failed to add section comment for {param_path}: {e}")
-            else:
-                # Copy the value first
-                commented_data[key] = value
-                # Then add comment if provenance exists
-                if prov_entry:
-                    source = prov_entry.file
-                    if prov_entry.line:
-                        source = f"{source} line:{prov_entry.line}"
-                        if prov_entry.col:
-                            source = f"{source},col:{prov_entry.col}"
-                    # Add category to comment if available
-                    if prov_entry.category:
-                        source = f"{source} (category:{prov_entry.category})"
-                    source = f"{source} [{param_path}]"
-                    try:
-                        commented_data.yaml_add_eol_comment(f"Source: {source}", key)
-                        comments_added += 1
-                        Log.debug(f"[PROV] Added leaf comment: {param_path} -> {source}")
-                    except Exception as e:
-                        Log.warning(f"[PROV] Failed to add leaf comment for {param_path}: {e}")
-                else:
-                    Log.debug(f"[PROV] No provenance found for: {param_path}")
-        
-        if not prefix and comments_added > 0:
-            Log.info(f"Added {comments_added} provenance comments to top-level data")
-        
-        return commented_data
-
     def save(self) -> None:
-        """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file with provenance comments."""
+        """Saves the experiment data into the ``experiment_folder/conf/metadata`` folder as a YAML file."""
         if self.is_current_logged_user_owner:
             if not self.metadata_folder.exists():
                 self.metadata_folder.mkdir(parents=True, exist_ok=True)
@@ -2514,41 +2023,10 @@ class AutosubmitConfig(object):
                             self.metadata_folder.joinpath("experiment_data.yml.bak"))
 
             try:
-                # Use tracker-based API to export with provenance comments
-                output_file = self.metadata_folder.joinpath("experiment_data.yml")
-                
-                # Prepare data for saving
-                data_to_save = clean_provenance(self.experiment_data)
-                
-                # Add provenance comments if tracking is enabled
-                if self.track_provenance and hasattr(self, 'provenance_tracker'):
-                    # DIAGNOSTIC LOGGING
-                    try:
-                        num_tracked = len(self.provenance_tracker.provenance_map)
-                        Log.info(f"[DIAG] Tracker has {num_tracked} entries before comment generation")
-                        if num_tracked > 0:
-                            examples = list(self.provenance_tracker.provenance_map.keys())[:5]
-                            Log.info(f"[DIAG] Example keys in tracker: {examples}")
-                        else:
-                            Log.warning(f"[DIAG] Tracker is EMPTY - no comments will be added!")
-                        
-                        # Show first few data keys
-                        data_keys = list(data_to_save.keys())[:5]
-                        Log.info(f"[DIAG] Top-level data keys: {data_keys}")
-                    except Exception as e:
-                        Log.warning(f"[DIAG] Failed to inspect tracker: {e}")
-                    
-                    data_to_save = self._add_provenance_comments(data_to_save)
-                    Log.info(f"[DIAG] After _add_provenance_comments, type={type(data_to_save).__name__}")
-                
-                # Save using ruamel.yaml
-                yaml_dumper = YAML()
-                yaml_dumper.default_flow_style = False
-                yaml_dumper.preserve_quotes = True
-                with open(str(output_file), 'w') as f:
-                    yaml_dumper.dump(data_to_save, f)
-                
-                output_file.chmod(0o755)
+                with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
+                    # Not using typ="safe" to preserve the readability of the file
+                    YAML().dump(self.experiment_data, stream)
+                self.metadata_folder.joinpath("experiment_data.yml").chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
                 if self.metadata_folder.joinpath("experiment_data.yml").exists():
@@ -2575,7 +2053,7 @@ class AutosubmitConfig(object):
                 if key not in last_run_data.keys():
                     differences[key] = val
                 else:
-                    if not isinstance(last_run_data[key], dict):
+                    if type(last_run_data[key]) is not dict:
                         differences[key] = val
                     elif len(last_run_data[key]) == 0 and len(last_run_data[key]) == len(current_data[key]):
                         continue
@@ -2593,7 +2071,7 @@ class AutosubmitConfig(object):
                 if key not in current_data.keys():
                     differences[key] = val
                 else:
-                    if isinstance(current_data[key], dict) and len(current_data[key]) == 0:
+                    if type(current_data[key]) is dict and len(current_data[key]) == 0:
                         diff = self.detailed_deep_diff(current_data[key], val, level)
                         if diff:
                             differences[key] = diff
@@ -2662,7 +2140,7 @@ class AutosubmitConfig(object):
                 else:
                     parameters_dict[new_key] = val
 
-        return clean_provenance(parameters_dict)
+        return parameters_dict
 
     def load_parameters(self):
         """Load all experiment data
@@ -2880,10 +2358,10 @@ class AutosubmitConfig(object):
                 string = f'[{date_value}]'
             else:
                 string = date_value
-            split_string = nestedExpr('[', ']').parseString(string).asList()
+            split_string = nested_expr('[', ']').parse_string(string).asList()
             string_date = None
             for split in split_string[0]:
-                if isinstance(split, list):
+                if type(split) is list:
                     for split_in in split:
                         if split_in.find("-") != -1:
                             split_numbers = split_in.split("-")
@@ -2955,10 +2433,10 @@ class AutosubmitConfig(object):
             return member_list
         elif not string.startswith("["):
             string = f'[{string}]'
-        split_string = nestedExpr('[', ']').parseString(string).asList()
+        split_string = nested_expr('[', ']').parse_string(string).asList()
         string_member = None
         for split in split_string[0]:
-            if isinstance(split, list):
+            if type(split) is list:
                 for split_in in split:
                     if split_in.find("-") != -1:
                         split_numbers = split_in.split("-")
@@ -3240,7 +2718,7 @@ class AutosubmitConfig(object):
         :return: expression
         :rtype: dict
         """
-        return clean_provenance(self.experiment_data.get("WRAPPERS", {}))
+        return self.experiment_data.get("WRAPPERS", {})
 
     def get_wrapper_jobs(self, wrapper=None):
         """Returns the jobs that should be wrapped, configured in the autosubmit's config.
@@ -3415,20 +2893,19 @@ class AutosubmitConfig(object):
                     os.chmod(f_name, 0o750)
 
     @staticmethod
-    def get_parser(parser_factory, file_path, category=None):
+    def get_parser(parser_factory, file_path):
         """Gets parser for given file.
 
         :param parser_factory:
         :param file_path: path to file to be parsed
         :type file_path: Path
-        :param category: Provenance category for this file (optional)
         :return: parser
         :rtype: YAMLParser
         """
         parser = parser_factory.create_parser()
         # For testing purposes
         if file_path == Path('/dummy/local/root/dir/a000/conf/') or file_path == Path('dummy/file/path'):
-            parser.data = parser.load(file_path, category=category)
+            parser.data = parser.load(file_path)
             if parser.data is None:
                 parser.data = {}
             return parser
@@ -3437,7 +2914,7 @@ class AutosubmitConfig(object):
 
         if file_path.match("*proj*"):
             if file_path.exists():
-                parser.data = parser.load(file_path, category=category)
+                parser.data = parser.load(file_path)
                 if parser.data is None:
                     parser.data = {}
             else:
@@ -3445,12 +2922,11 @@ class AutosubmitConfig(object):
         else:
             # This block may rise an exception but all its callers handle it
             try:
-                # Pass file_path directly to parser.load so yaml_provenance can track line/column positions
-                parser.data = parser.load(file_path, category=category)
-                if parser.data is None:
-                    parser.data = {}
-            except IOError as e:
-                Log.debug(f"Failed to load config file {file_path}: {str(e)}")
+                with open(file_path) as f:
+                    parser.data = parser.load(f)
+                    if parser.data is None:
+                        parser.data = {}
+            except IOError:
                 parser.data = {}
                 return parser
             except Exception as exp:
@@ -3468,5 +2944,5 @@ class AutosubmitConfig(object):
         """
         for wrapper in self.experiment_data.get("WRAPPERS", {}).values():
             if isinstance(wrapper, dict) and section in wrapper.get("JOBS_IN_WRAPPER", []):
-                return clean_provenance(wrapper)
+                return wrapper
         return {}

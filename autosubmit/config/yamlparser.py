@@ -16,8 +16,34 @@
 # along with Autosubmit.  If not, see <http://www.gnu.org/licenses/>.
 
 
+from pathlib import Path
+
 from ruamel.yaml import YAML
-from yaml_provenance import load_yaml_with_tracking, ProvenanceConfig, configure, ProvenanceTracker
+
+# ---------------------------------------------------------------------------
+# Optional yaml-provenance integration
+# ---------------------------------------------------------------------------
+# When the ``yaml-provenance`` library is installed every value loaded from a
+# YAML file becomes a ``WithProvenance`` subclass of its native type (str, int,
+# …).  This means any downstream code can inspect *which* file, line and column
+# a value originated from without any changes to the rest of Autosubmit.
+#
+# Install (from the feature branch until merged to main):
+#   pip install "yaml-provenance @ git+https://github.com/esm-tools/yaml-provenance.git@feat/yaml_dumper"
+#
+# If the library is not installed, loading falls back silently to the standard
+# ruamel.yaml behaviour so nothing breaks.
+# ---------------------------------------------------------------------------
+try:
+    from yaml_provenance import load_yaml, configure, ProvenanceConfig
+
+    # Enable full provenance history so merges across multiple YAML files
+    # preserve a complete chain of origin information.
+    configure(ProvenanceConfig(track_history=True))
+
+    _HAS_YAML_PROVENANCE = True
+except ImportError:
+    _HAS_YAML_PROVENANCE = False
 
 
 class YAMLParserFactory:
@@ -32,45 +58,45 @@ class YAMLParser(YAML):
 
     def __init__(self):
         self.data = []
-        self.category = None
-        self.tracker = ProvenanceTracker()  # Store tracker for provenance
         super(YAMLParser, self).__init__(typ="safe")
-    
-    def load(self, stream, category=None):
+
+    def load(self, stream):
+        """Load YAML from *stream*, attaching provenance metadata when available.
+
+        If ``yaml-provenance`` is installed the returned mapping is a
+        ``DictWithProvenance`` instance where every leaf value carries its
+        source ``yaml_file``, ``line`` and ``col``.  These survive through
+        subsequent ``dict`` operations because ``WithProvenance`` objects are
+        transparent subclasses of their native Python types.
+
+        If ``yaml-provenance`` is **not** installed (or loading via it fails for
+        any reason) the method falls back to the standard ``ruamel.yaml``
+        loader transparently.
+
+        :param stream: An open file-like object (must expose ``.name``) or a
+            ``str``/``pathlib.Path`` pointing to the YAML file.
+        :return: Parsed mapping (``DictWithProvenance`` or plain ``dict``).
         """
-        Load YAML with tracker-based provenance tracking.
-        
-        Parameters
-        ----------
-        stream : str, Path, or file-like object
-            The YAML file path or file object to load
-        category : str, optional
-            Category for provenance tracking (e.g., 'base', 'model', 'environment')
-            
-        Returns
-        -------
-        dict
-            The loaded data as plain dict (not wrapper)
-        """
-        # Store category for potential later use
-        if category is not None:
-            self.category = category
-        
-        # If stream is a file-like object, get its file path
-        # Use 'read' attribute to distinguish file objects from Path objects
-        # (Path objects have .name but it only returns the filename, not the full path)
-        if hasattr(stream, 'read'):
-            filepath = stream.name
-        else:
-            # Ensure Path objects are converted to strings for yaml_provenance
-            filepath = str(stream)
-        
-        # Use tracker-based API: load_yaml_with_tracking returns (data, tracker)
-        # Pass category to tracking
-        data, tracker = load_yaml_with_tracking(filepath, category=category)
-        
-        # Store tracker for later access by configcommon.py
-        self.tracker = tracker
-        
-        # Return plain dict (not wrapper)
-        return data
+        if _HAS_YAML_PROVENANCE:
+            # Resolve a concrete file path from whatever we received.
+            filepath = None
+            if hasattr(stream, "name"):
+                # Open file object — extract path without consuming the stream.
+                filepath = stream.name
+            elif isinstance(stream, (str, Path)):
+                filepath = stream
+
+            if filepath is not None:
+                try:
+                    result = load_yaml(filepath)
+                    return result if result is not None else {}
+                except Exception:
+                    # Any error (e.g. file not found, parse error) falls
+                    # through to the ruamel.yaml loader below so that the
+                    # existing exception-handling in get_parser() still works.
+                    pass
+
+        # ------------------------------------------------------------------ #
+        # Fallback: standard ruamel.yaml load (no provenance tracking).       #
+        # ------------------------------------------------------------------ #
+        return super().load(stream)
