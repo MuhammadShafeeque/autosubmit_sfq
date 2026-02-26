@@ -870,12 +870,14 @@ class AutosubmitConfig(object):
                     if not dependency_data.get("ANY_FINAL_STATUS_IS_VALID", False):
                         if isinstance(status_upper, str) and status_upper.endswith("?"):
                             status_upper = _preserve_prov(status_upper, status_upper[:-1])
-                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
+                            # ANY_FINAL_STATUS_IS_VALID is a computed bool; borrow provenance
+                            # from the STATUS value so it carries a meaningful source comment.
+                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = _preserve_prov(status_orig, True)
                         elif str(status_upper) not in ["READY", "DELAYED", "PREPARED", "SKIPPED", "FAILED",
                                                        "COMPLETED"]:
-                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
+                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = _preserve_prov(status_orig, True)
                         else:
-                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = False
+                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = _preserve_prov(status_orig, False)
                     dependency_data["STATUS"] = status_upper
 
         return aux_dependencies
@@ -892,15 +894,43 @@ class AutosubmitConfig(object):
         return files
 
     def dict_replace_value(self, d: dict, old: str, new: str, index: int, section_names: list) -> dict:
+        """Replace *old* with *new* inside the nested dict *d*, preserving WithProvenance.
+
+        Two substitution modes are handled:
+
+        * **Whole-value** (``d[key] == old``): assign *new* directly so any
+          ``WithProvenance`` metadata on *new* is preserved intact.  If *new* is a
+          plain ``str`` (e.g. the result of a partial concatenation higher up the
+          call chain), re-attach the *original* value's provenance so the YAML
+          source location is not lost.
+
+        * **Partial** (``old`` is a substring of ``d[key]``): perform the text
+          substitution with ``.replace()`` and then re-attach the original value's
+          provenance via :func:`_preserve_prov`.
+
+        Both scalar and list-item variants follow the same logic.
+        """
         current_section = section_names.pop()
         if d.get(current_section, None) is None:
             return d
         if isinstance(d[current_section], dict):
             d[current_section] = self.dict_replace_value(d[current_section], old, new, index, section_names)
         elif isinstance(d[current_section], list):
-            d[current_section][index] = d[current_section][index].replace(old[index], new)
+            item = d[current_section][index]
+            old_item = old[index] if isinstance(old, list) else old
+            if str(item) == str(old_item):
+                # Whole-value: keep WithProvenance on new; or restore original prov.
+                d[current_section][index] = new if hasattr(new, 'provenance') else _preserve_prov(item, new)
+            else:
+                # Partial: replace text, restore original item's provenance.
+                d[current_section][index] = _preserve_prov(item, item.replace(old_item, new))
         elif isinstance(d[current_section], str) and d[current_section] == old:
-            d[current_section] = d[current_section].replace(old, new)
+            # Whole-value: keep WithProvenance on new; or restore original prov.
+            d[current_section] = new if hasattr(new, 'provenance') else _preserve_prov(d[current_section], new)
+        elif isinstance(d[current_section], str):
+            # Partial: replace text, restore original value's provenance.
+            original = d[current_section]
+            d[current_section] = _preserve_prov(original, original.replace(old, new))
         return d
 
     def convert_list_to_string(self, data):
@@ -1726,11 +1756,13 @@ class AutosubmitConfig(object):
             if type(parser['EXPERIMENT'].get('CHUNKSIZE', "-1")) not in [int]:
                 if parser['EXPERIMENT']['CHUNKSIZE'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CHUNKSIZE is not defined"]]
-                parser['EXPERIMENT']['CHUNKSIZE'] = int(parser['EXPERIMENT']['CHUNKSIZE'])
+                _cs = parser['EXPERIMENT']['CHUNKSIZE']
+                parser['EXPERIMENT']['CHUNKSIZE'] = _preserve_prov(_cs, int(_cs))
             if type(parser['EXPERIMENT'].get('NUMCHUNKS', "-1")) not in [int]:
                 if parser['EXPERIMENT']['NUMCHUNKS'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.NUMCHUNKS is not defined"]]
-                parser['EXPERIMENT']['NUMCHUNKS'] = int(parser['EXPERIMENT']['NUMCHUNKS'])
+                _nc = parser['EXPERIMENT']['NUMCHUNKS']
+                parser['EXPERIMENT']['NUMCHUNKS'] = _preserve_prov(_nc, int(_nc))
             if parser['EXPERIMENT'].get('CALENDAR', "").lower() not in ['standard', 'noleap']:
                 self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CALENDAR choice is invalid"]]
         if parser.get('PROJECT', "") == "":
