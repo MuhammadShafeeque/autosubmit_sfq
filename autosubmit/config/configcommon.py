@@ -659,9 +659,14 @@ class AutosubmitConfig(object):
                 if len(val) > 0 and isinstance(val[0], collections.abc.Mapping):
                     unified_config[key] = val
                 else:
-                    current_list = unified_config.get(key, [])
-                    if current_list != val:
-                        unified_config[key] = val
+                    # Always replace the current list with the new one.  The original
+                    # ``current_list != val`` guard was an optimisation that fires
+                    # incorrectly when ``val`` contains ``StrWithProvenance`` items and
+                    # ``current_list`` contains plain str items of the same value:
+                    # ``StrWithProvenance.__eq__`` uses plain-str comparison, so the
+                    # lists appear equal and the provenance-bearing ``val`` is silently
+                    # discarded in favour of the plain-string ``current_list``.
+                    unified_config[key] = val
             else:
                 unified_config[key] = new_dict[key]
         return unified_config
@@ -776,10 +781,14 @@ class AutosubmitConfig(object):
         notify_on = data_fixed["JOBS"][job_section].get("NOTIFY_ON", "")
         if notify_on:
             if isinstance(notify_on, str):
+                # Split the scalar string into individual status tokens.  str.split()
+                # returns plain str items even when called on a StrWithProvenance, so
+                # we borrow the parent string's provenance for every token we produce.
                 if "," in notify_on:
-                    notify_on = notify_on.split(",")
+                    parts = notify_on.split(",")
                 else:
-                    notify_on = notify_on.split()
+                    parts = notify_on.split()
+                notify_on = [_preserve_prov(notify_on, p.strip()) for p in parts]
             # Preserve provenance: .strip().upper() on StrWithProvenance returns plain str
             data_fixed["JOBS"][job_section]["NOTIFY_ON"] = [
                 _preserve_prov(status, status.strip(" ").upper()) for status in notify_on
@@ -803,15 +812,20 @@ class AutosubmitConfig(object):
             if "FILE" in job_data or must_exists:
                 file_orig = job_data.get("FILE", "")
                 files = self._normalize_files(file_orig)
-                # Preserve provenance on FILE: .strip() returns plain str
+                # Preserve provenance on FILE: .strip() returns plain str.
+                # When FILE is a comma/space-separated string, _normalize_files
+                # splits it and files[0] is a plain str.  Use _preserve_prov with
+                # file_orig so the provenance of the original FILE scalar is kept.
                 stripped = files[0].strip(" ")
-                data_fixed["JOBS"][job]["FILE"] = _preserve_prov(
-                    file_orig if not isinstance(file_orig, list) else (file_orig[0] if file_orig else file_orig),
-                    stripped,
-                )
+                _file_prov_src = (file_orig if not isinstance(file_orig, list)
+                                  else (file_orig[0] if file_orig else file_orig))
+                data_fixed["JOBS"][job]["FILE"] = _preserve_prov(_file_prov_src, stripped)
                 if len(files) > 1:
+                    # files[1:] are plain str items produced by _normalize_files's
+                    # .split().  Borrow provenance from the original FILE value so
+                    # each ADDITIONAL_FILES entry traces back to where FILE was defined.
                     data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = [
-                        _preserve_prov(f, f.strip(" ")) for f in files[1:]
+                        _preserve_prov(file_orig, f.strip(" ")) for f in files[1:]
                     ]
 
             if "ADDITIONAL_FILES" not in data_fixed["JOBS"][job] and must_exists:
@@ -884,6 +898,18 @@ class AutosubmitConfig(object):
 
     @staticmethod
     def _normalize_files(files: Union[str, list[str]]) -> list[str]:
+        """Split a FILE value into a list of individual file paths.
+
+        When *files* is already a list (e.g. a YAML block-sequence), it is
+        returned as-is so that ``StrWithProvenance`` items keep their metadata.
+
+        When *files* is a scalar string (comma- or space-separated paths), the
+        result of ``str.split()`` consists of plain ``str`` items — provenance on
+        the original ``StrWithProvenance`` scalar is intentionally *not*
+        propagated here because the caller (``_normalize_jobs_section``) is
+        responsible for re-attaching the parent provenance with
+        ``_preserve_prov(file_orig, item)`` for each split fragment.
+        """
         if not isinstance(files, list):
             if ',' in files:
                 files = files.split(",")
