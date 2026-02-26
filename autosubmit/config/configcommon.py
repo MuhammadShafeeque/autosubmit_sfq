@@ -874,9 +874,9 @@ class AutosubmitConfig(object):
                         elif str(status_upper) not in ["READY", "DELAYED", "PREPARED", "SKIPPED", "FAILED",
                                                        "COMPLETED"]:
                             dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
-                    dependency_data["STATUS"] = status_upper
                         else:
                             dependency_data["ANY_FINAL_STATUS_IS_VALID"] = False
+                    dependency_data["STATUS"] = status_upper
 
         return aux_dependencies
 
