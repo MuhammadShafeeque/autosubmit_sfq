@@ -79,10 +79,10 @@ def _wrap_with_source(value: Any, source: str) -> Any:
         KEY: value  # <source>,line:0,col:0
 
     Suggested *source* formats:
-    - ``"autosubmit.config.BasicConfig"``   — for BasicConfig.props() values
-    - ``"environment:$VAR_NAME"``           — for os.environ lookups
-    - ``"computed:PLATFORMS.ARCH.PARAM"``  — for HPC* derived values
-    - ``"git:<project_dir>/.git/HEAD"``    — for workflow commit
+    - ``"autosubmit.config.BasicConfig.ATTR_NAME"`` — for BasicConfig.props()
+    - ``"environment:$VAR_NAME"``                  — for os.environ lookups
+    - ``"computed:PLATFORMS.ARCH.PARAM"``           — for HPC* derived values
+    - ``"git:<project_dir>/.git/HEAD"``             — for workflow commit
     - ``"computed:BasicConfig.LOCAL_ROOT_DIR/<expid>"`` — for ROOTDIR/PROJDIR
 
     :param value: The value to annotate.
@@ -100,24 +100,54 @@ def _wrap_with_source(value: Any, source: str) -> Any:
         return value
 
 
-def _wrap_dict_with_source(d: dict, source: str) -> dict:
-    """Wrap every scalar leaf of *d* with *source* provenance in-place.
+def _preserve_prov(original: Any, result: Any) -> Any:
+    """Return *result* wrapped with the provenance of *original*.
 
-    Recurses into nested dicts.  Leaves that already carry provenance (i.e.
-    WithProvenance instances) are left untouched so existing YAML-file
-    provenance is not overwritten.
+    Used when a string operation (``str.upper()``, ``str.strip()``, etc.)
+    produces a plain ``str`` from a ``WithProvenance`` subclass, discarding
+    the provenance.  This helper re-attaches the original provenance to the
+    new value so the transformation is transparent in experiment_data.yml.
+
+    When yaml-provenance is not installed, or *original* has no provenance,
+    the function returns *result* unchanged — always safe to call.
+
+    :param original: The WithProvenance source value (before the operation).
+    :param result: The plain-str result of the operation.
+    :return: *result* with *original*'s provenance, or *result* as-is.
+    """
+    if not _HAS_YAML_PROVENANCE or _wp_factory is None:
+        return result
+    prov = getattr(original, 'provenance', None)
+    if not prov:
+        return result
+    try:
+        return _wp_factory(result, prov[-1])
+    except Exception:
+        return result
+
+
+def _wrap_dict_with_source(d: dict, source_prefix: str) -> dict:
+    """Wrap every scalar leaf of *d* with a per-key provenance source in-place.
+
+    For each key ``K``, the source annotation is ``<source_prefix>.<K>`` so
+    that the resulting comment is e.g.
+    ``# autosubmit.config.BasicConfig.DB_DIR,line:0,col:0``.
+
+    Recurses into nested dicts (using the same prefix, not extending it, so
+    that nested BasicConfig dicts are still attributed to the top-level class).
+    Leaves that already carry provenance are left untouched.
 
     :param d: Dict to annotate (modified in-place and returned).
-    :param source: Source description passed to :func:`_wrap_with_source`.
+    :param source_prefix: Base source string (e.g. ``"autosubmit.config.BasicConfig"``).
     :return: The annotated dict.
     """
     if not _HAS_YAML_PROVENANCE:
         return d
     for key, value in d.items():
         if isinstance(value, dict):
-            _wrap_dict_with_source(value, source)
+            _wrap_dict_with_source(value, source_prefix)
         elif not hasattr(value, 'provenance'):
-            d[key] = _wrap_with_source(value, source)
+            d[key] = _wrap_with_source(value, f"{source_prefix}.{key}")
     return d
 
 
@@ -655,10 +685,13 @@ class AutosubmitConfig(object):
     def _normalize_default_section(self, data_fixed: dict) -> None:
         default_section = data_fixed.get("DEFAULT", {})
         if "HPCARCH" in default_section:
-            data_fixed["DEFAULT"]["HPCARCH"] = default_section["HPCARCH"].upper()
+            orig = default_section["HPCARCH"]
+            data_fixed["DEFAULT"]["HPCARCH"] = _preserve_prov(orig, orig.upper())
         if "CUSTOM_CONFIG" in default_section:
             try:
-                data_fixed["DEFAULT"]["CUSTOM_CONFIG"] = self.convert_list_to_string(default_section["CUSTOM_CONFIG"])
+                orig = default_section["CUSTOM_CONFIG"]
+                converted = self.convert_list_to_string(orig)
+                data_fixed["DEFAULT"]["CUSTOM_CONFIG"] = _preserve_prov(orig, converted)
             except Exception:
                 pass
 
@@ -747,7 +780,10 @@ class AutosubmitConfig(object):
                     notify_on = notify_on.split(",")
                 else:
                     notify_on = notify_on.split()
-            data_fixed["JOBS"][job_section]["NOTIFY_ON"] = [status.strip(" ").upper() for status in notify_on]
+            # Preserve provenance: .strip().upper() on StrWithProvenance returns plain str
+            data_fixed["JOBS"][job_section]["NOTIFY_ON"] = [
+                _preserve_prov(status, status.strip(" ").upper()) for status in notify_on
+            ]
 
     def _normalize_jobs_section(self, data_fixed: dict, must_exists: bool) -> None:
         for job, job_data in data_fixed.get("JOBS", {}).items():
@@ -759,15 +795,24 @@ class AutosubmitConfig(object):
                 if isinstance(custom_directives, list):
                     custom_directives = str(custom_directives)
                 if isinstance(custom_directives, str):
-                    data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = str(custom_directives)
+                    orig = job_data.get("CUSTOM_DIRECTIVES", "")
+                    data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = _preserve_prov(orig, str(custom_directives))
                 else:
                     data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = custom_directives
 
             if "FILE" in job_data or must_exists:
-                files = self._normalize_files(job_data.get("FILE", ""))
-                data_fixed["JOBS"][job]["FILE"] = files[0].strip(" ")
+                file_orig = job_data.get("FILE", "")
+                files = self._normalize_files(file_orig)
+                # Preserve provenance on FILE: .strip() returns plain str
+                stripped = files[0].strip(" ")
+                data_fixed["JOBS"][job]["FILE"] = _preserve_prov(
+                    file_orig if not isinstance(file_orig, list) else (file_orig[0] if file_orig else file_orig),
+                    stripped,
+                )
                 if len(files) > 1:
-                    data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = [file.strip(" ") for file in files[1:]]
+                    data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = [
+                        _preserve_prov(f, f.strip(" ")) for f in files[1:]
+                    ]
 
             if "ADDITIONAL_FILES" not in data_fixed["JOBS"][job] and must_exists:
                 data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = []
@@ -794,7 +839,7 @@ class AutosubmitConfig(object):
                 # Truncate SS to "HH:MM"
                 Log.warning(
                     f"Wallclock {wallclock} is in HH:MM:SS format. Autosubmit does not support the seconds. Truncating to HH:MM")
-                data_fixed["JOBS"][job]["WALLCLOCK"] = wallclock[:5]
+                data_fixed["JOBS"][job]["WALLCLOCK"] = _preserve_prov(wallclock, wallclock[:5])
 
     @staticmethod
     def _normalize_dependencies(dependencies: Union[str, dict]) -> dict:
@@ -820,14 +865,16 @@ class AutosubmitConfig(object):
             for dependency, dependency_data in dependencies.items():
                 aux_dependencies[dependency.upper()] = dependency_data
                 if isinstance(dependency_data, dict) and dependency_data.get("STATUS", None):
-                    dependency_data["STATUS"] = dependency_data["STATUS"].upper()
+                    status_orig = dependency_data["STATUS"]
+                    status_upper = _preserve_prov(status_orig, status_orig.upper())
                     if not dependency_data.get("ANY_FINAL_STATUS_IS_VALID", False):
-                        if dependency_data["STATUS"][-1] == "?":
-                            dependency_data["STATUS"] = dependency_data["STATUS"][:-1]
+                        if isinstance(status_upper, str) and status_upper.endswith("?"):
+                            status_upper = _preserve_prov(status_upper, status_upper[:-1])
                             dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
-                        elif dependency_data["STATUS"] not in ["READY", "DELAYED", "PREPARED", "SKIPPED", "FAILED",
-                                                               "COMPLETED"]:  # May change in future issues.
+                        elif str(status_upper) not in ["READY", "DELAYED", "PREPARED", "SKIPPED", "FAILED",
+                                                       "COMPLETED"]:
                             dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
+                    dependency_data["STATUS"] = status_upper
                         else:
                             dependency_data["ANY_FINAL_STATUS_IS_VALID"] = False
 
@@ -1290,7 +1337,14 @@ class AutosubmitConfig(object):
             param = param.get(k.upper(), {})
             if isinstance(param, int):
                 param = str(param)
-        return str(rest_of_key_start) + str(param) + str(rest_of_key_end) if param else None
+        if not param:
+            return None
+        # When the entire value is a reference (no surrounding text), return
+        # param directly so its WithProvenance type and provenance are preserved.
+        # When there is surrounding text, concatenation forces a plain str.
+        if rest_of_key_start == '' and rest_of_key_end == '':
+            return param
+        return str(rest_of_key_start) + str(param) + str(rest_of_key_end)
 
     def _update_parameters(
             self,
