@@ -40,15 +40,15 @@ from ruamel.yaml import YAML
 # Optional yaml-provenance integration
 # ---------------------------------------------------------------------------
 # When yaml-provenance is installed (see yamlparser.py for install notes)
-# ``DictWithProvenance`` is used as the output container of ``deep_normalize``
-# so that provenance is preserved at every nesting level, not just on leaf
-# values.  The library is an optional dependency; everything works without it.
+# WithProvenance leaf values (StrWithProvenance, IntWithProvenance, etc.) are
+# transparent subclasses of their native types and carry provenance metadata
+# independently. No container-level changes are needed here.
+# The flag is kept so get_value_provenance() can guard its behaviour.
 # ---------------------------------------------------------------------------
 try:
-    from yaml_provenance import DictWithProvenance as _DictWithProvenance
+    import yaml_provenance as _yaml_provenance  # noqa: F401 — presence check only
     _HAS_YAML_PROVENANCE = True
 except ImportError:
-    _DictWithProvenance = None  # type: ignore[assignment,misc]
     _HAS_YAML_PROVENANCE = False
 
 from autosubmit.config.basicconfig import BasicConfig
@@ -503,10 +503,11 @@ class AutosubmitConfig(object):
         :return: A new dictionary with all keys normalized to uppercase.
         :rtype: dict[str, Any]
         """
-        # Use DictWithProvenance as the container when the library is available
-        # so section-level provenance survives normalisation.  Falls back to a
-        # plain dict transparently — callers only ever type-check against dict.
-        normalized_data = _DictWithProvenance() if _HAS_YAML_PROVENANCE else dict()
+        # Use a plain dict as the output container. Leaf values loaded by
+        # yaml-provenance are already WithProvenance subclasses of their native
+        # types (StrWithProvenance, IntWithProvenance, …) and carry their own
+        # provenance metadata independently of the container type.
+        normalized_data = dict()
         with suppress(Exception):
             for key, val in data.items():
                 normalized_key = str(key).upper()
