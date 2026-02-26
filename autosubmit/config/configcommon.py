@@ -2044,8 +2044,16 @@ class AutosubmitConfig(object):
 
             try:
                 with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
-                    # Not using typ="safe" to preserve the readability of the file
-                    YAML().dump(self.experiment_data, stream)
+                    if _HAS_YAML_PROVENANCE:
+                        # dump_yaml writes inline provenance comments (file/line/col)
+                        # and correctly serialises NoneWithProvenance as empty YAML
+                        # values rather than ruamel anchor/alias references (*id001).
+                        from yaml_provenance import dump_yaml
+                        dump_yaml(self.experiment_data, stream=stream)
+                    else:
+                        # Fallback: plain ruamel dump (no provenance annotations).
+                        # Not using typ="safe" to preserve readability.
+                        YAML().dump(self.experiment_data, stream)
                 self.metadata_folder.joinpath("experiment_data.yml").chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")
