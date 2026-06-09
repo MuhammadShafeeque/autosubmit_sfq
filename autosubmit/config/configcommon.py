@@ -936,7 +936,7 @@ class AutosubmitConfig(object):
         if custom_conf_directive is not None:
             # Check if directive is a dictionary
             if type(custom_conf_directive) is not dict:
-                if type(custom_conf_directive) is str and custom_conf_directive != "":
+                if isinstance(custom_conf_directive, str) and custom_conf_directive != "":
                     if ',' in custom_conf_directive:
                         filenames_to_load["PRE"] = custom_conf_directive.split(',')
                     else:
