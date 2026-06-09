@@ -36,6 +36,54 @@ from configobj import ConfigObj
 from pyparsing import nested_expr
 from ruamel.yaml import YAML
 
+# ---------------------------------------------------------------------------
+# yaml-provenance integration
+# ---------------------------------------------------------------------------
+# WithProvenance leaf values (StrWithProvenance, IntWithProvenance, etc.) are
+# transparent subclasses of their native types and carry provenance metadata
+# independently.  No container-level changes are needed here.
+# ProvenanceJSONEncoder is used in get_full_config_as_json().
+#
+# _wrap_with_source() / _wrap_dict_with_source() annotate programmatically
+# injected values (BasicConfig props, environment vars, computed HPC params,
+# git commit) so they appear with meaningful comments in experiment_data.yml
+# instead of "# no provenance".
+# ---------------------------------------------------------------------------
+from yaml_provenance import (
+    wrap_computed,
+    transfer_provenance,
+    annotate_dict,
+    ProvenanceJSONEncoder as _ProvenanceJSONEncoder,
+)
+
+
+def _wrap_with_source(value: Any, source: str) -> Any:
+    """Wrap *value* with provenance pointing to *source*.
+
+    Thin wrapper around ``yaml_provenance.wrap_computed``.
+    """
+    try:
+        return wrap_computed(value, source)
+    except Exception:
+        return value
+
+
+def _preserve_prov(original: Any, result: Any) -> Any:
+    """Return *result* with *original*'s provenance re-attached.
+
+    Thin wrapper around ``yaml_provenance.transfer_provenance``.
+    """
+    return transfer_provenance(original, result)
+
+
+def _wrap_dict_with_source(d: dict, source_prefix: str) -> dict:
+    """Wrap every scalar leaf of *d* with per-key provenance.
+
+    Thin wrapper around ``yaml_provenance.annotate_dict``.
+    """
+    return annotate_dict(d, source_prefix)
+
+
 from autosubmit.config.basicconfig import BasicConfig
 from autosubmit.database.db_common import get_experiment_description
 from autosubmit.config.yamlparser import YAMLParserFactory
@@ -151,7 +199,7 @@ class AutosubmitConfig(object):
     def get_full_config_as_json(self):
         """Return config as json object"""
         try:
-            return json.dumps(self.experiment_data)
+            return json.dumps(self.experiment_data, cls=_ProvenanceJSONEncoder)
         except Exception as e:
             Log.warning(f"Autosubmit was not able to retrieve and save the configuration "
                         f"into the historical database: {str(e)}")
@@ -173,6 +221,15 @@ class AutosubmitConfig(object):
             self.get_project_destination()
         )
         return str(dir_templates)
+
+    def get_x11(self, section: str) -> str:
+        """Active X11 for this section
+        :param section: job type
+        :type section: str
+        :return: false/true
+        :rtype: str
+        """
+        return str(self.get_section([section, 'X11'], "false")).lower()
 
     def get_section(self, section: list[str], d_value: Union[str, Any] = "", must_exists=False) -> str:
         """Gets any section.
@@ -196,7 +253,7 @@ class AutosubmitConfig(object):
         current_level: Union[str, dict] = self.experiment_data.get(section[0], "")
         for param in section[1:]:
             if current_level:
-                if type(current_level) is dict:
+                if isinstance(current_level, dict):
                     current_level = current_level.get(param, d_value)
                 else:
                     if must_exists:
@@ -211,6 +268,37 @@ class AutosubmitConfig(object):
             return d_value
         return current_level
 
+    def get_value_provenance(self, section: list[str]) -> list[dict]:
+        """Return the provenance history of a configuration value.
+
+        This is a convenience wrapper around ``get_section`` that exposes the
+        ``yaml-provenance`` metadata attached to a leaf value.  Each entry in
+        the returned list is a dict of the form::
+
+            {'yaml_file': '/path/to/conf/expdef_a001.yml', 'line': 14, 'col': 8}
+
+        The *last* element is the current (winning) provenance; earlier entries
+        are present only when ``ProvenanceConfig(track_history=True)`` is set
+        (which is the default in ``yamlparser.py``).
+
+        Returns an empty list when the value is not found or when the value
+        is a plain Python object without provenance metadata (e.g. a value
+        that was synthesised internally rather than read from a file).
+
+        :param section: Dot-separated key path as a list, e.g.
+            ``["JOBS", "INI", "WALLCLOCK"]``.
+        :type section: list[str]
+        :return: List of provenance dicts (empty when unavailable).
+        :rtype: list[dict]
+        """
+        value = self.get_section(section)
+        provenance = getattr(value, "provenance", None)
+        if provenance is None:
+            return []
+        if isinstance(provenance, list):
+            return [dict(p) for p in provenance]
+        return [dict(provenance)]
+
     def get_wchunkinc(self, section: str) -> str:
         """Gets the chunk increase to wallclock.
 
@@ -220,6 +308,76 @@ class AutosubmitConfig(object):
         :rtype: str
         """
         return self.jobs_data.get(section, {}).get('WCHUNKINC', "")
+
+    def get_synchronize(self, section: str) -> str:
+        """Gets wallclock for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: wallclock time
+        :rtype: str
+        """
+        return self.get_section([section, 'SYNCHRONIZE'], "")
+
+    def get_processors(self, section: str) -> str:
+        """Gets processors needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: wallclock time
+        :rtype: str
+        """
+        return str(self.get_section([section, 'PROCESSORS'], 1))
+
+    def get_threads(self, section: str) -> str:
+        """Gets threads needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: threads needed
+        :rtype: str
+        """
+        return str(self.get_section([section, 'THREADS'], 1))
+
+    def get_tasks(self, section: str) -> str:
+        """Gets tasks needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: tasks (processes) per host
+        :rtype: str
+        """
+        return str(self.get_section([section, 'TASKS'], ""))
+
+    def get_scratch_free_space(self, section: str) -> int:
+        """Gets scratch free space needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: percentage of scratch free space needed
+        :rtype: int
+        """
+        return int(self.get_section([section, 'SCRATCH_FREE_SPACE'], ""))
+
+    def get_memory(self, section: str) -> str:
+        """Gets memory needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: memory needed
+        :rtype: str
+        """
+        return str(self.get_section([section, 'MEMORY'], ""))
+
+    def get_memory_per_task(self, section: str) -> str:
+        """Gets memory per task needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: memory per task needed
+        :rtype: str
+        """
+        return str(self.get_section([section, 'MEMORY_PER_TASK'], ""))
 
     def get_current_user(self, section: str) -> str:
         """Returns the user to be changed from platform config file.
@@ -339,6 +497,17 @@ class AutosubmitConfig(object):
         open(self._platforms_parser_file, 'w').write(content)
         open(self._platforms_parser_file, 'a').write(content_to_mod)
 
+    def get_custom_directives(self, section: str) -> str:
+        """Gets custom directives needed for the given job type.
+
+        :param section: job type
+        :type section: str
+        :return: custom directives needed
+        :rtype: str
+        """
+        directives = self.get_section([section, 'CUSTOM_DIRECTIVES'], "")
+        return directives
+
     def show_messages(self) -> bool:
 
         if len(list(self.warn_config.keys())) == 0 and len(list(self.wrong_config.keys())) == 0:
@@ -380,7 +549,7 @@ class AutosubmitConfig(object):
         normalized_data = dict()
         with suppress(Exception):
             for key, val in data.items():
-                normalized_key = str(key).upper()
+                normalized_key = _preserve_prov(key, str(key).upper())
                 if isinstance(val, collections.abc.Mapping):
                     normalized_data[normalized_key] = self.deep_normalize(val)
                 elif isinstance(val, list):
@@ -438,10 +607,15 @@ class AutosubmitConfig(object):
     def _normalize_default_section(self, data_fixed: dict) -> None:
         default_section = data_fixed.get("DEFAULT", {})
         if "HPCARCH" in default_section:
-            data_fixed["DEFAULT"]["HPCARCH"] = default_section["HPCARCH"].upper()
+            orig = default_section["HPCARCH"]
+            data_fixed["DEFAULT"]["HPCARCH"] = _preserve_prov(orig, orig.upper())
         if "CUSTOM_CONFIG" in default_section:
-            with suppress(Exception):
-                data_fixed["DEFAULT"]["CUSTOM_CONFIG"] = self.convert_list_to_string(default_section["CUSTOM_CONFIG"])
+            try:
+                orig = default_section["CUSTOM_CONFIG"]
+                converted = self.convert_list_to_string(orig)
+                data_fixed["DEFAULT"]["CUSTOM_CONFIG"] = _preserve_prov(orig, converted)
+            except Exception:
+                pass
 
     @staticmethod
     def _normalize_jobs_in_wrapper(
@@ -535,12 +709,15 @@ class AutosubmitConfig(object):
         """
         notify_on = data_fixed["JOBS"][job_section].get("NOTIFY_ON", "")
         if notify_on:
-            if type(notify_on) is str:
+            if isinstance(notify_on, str):
                 if "," in notify_on:
-                    notify_on = notify_on.split(",")
+                    parts = notify_on.split(",")
                 else:
-                    notify_on = notify_on.split()
-            data_fixed["JOBS"][job_section]["NOTIFY_ON"] = [status.strip(" ").upper() for status in notify_on]
+                    parts = notify_on.split()
+                notify_on = [_preserve_prov(notify_on, p.strip()) for p in parts]
+            data_fixed["JOBS"][job_section]["NOTIFY_ON"] = [
+                _preserve_prov(status, status.strip(" ").upper()) for status in notify_on
+            ]
 
     def _normalize_jobs_section(self, data_fixed: dict, must_exists: bool) -> None:
         for job, job_data in data_fixed.get("JOBS", {}).items():
@@ -551,16 +728,23 @@ class AutosubmitConfig(object):
                 custom_directives = job_data.get("CUSTOM_DIRECTIVES", "")
                 if isinstance(custom_directives, list):
                     custom_directives = str(custom_directives)
-                if type(custom_directives) is str:
-                    data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = str(custom_directives)
+                if isinstance(custom_directives, str):
+                    orig = job_data.get("CUSTOM_DIRECTIVES", "")
+                    data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = _preserve_prov(orig, str(custom_directives))
                 else:
                     data_fixed["JOBS"][job]["CUSTOM_DIRECTIVES"] = custom_directives
 
             if "FILE" in job_data or must_exists:
-                files = self._normalize_files(job_data.get("FILE", ""))
-                data_fixed["JOBS"][job]["FILE"] = files[0].strip(" ")
+                file_orig = job_data.get("FILE", "")
+                files = self._normalize_files(file_orig)
+                stripped = files[0].strip(" ")
+                _file_prov_src = (file_orig if not isinstance(file_orig, list)
+                                  else (file_orig[0] if file_orig else file_orig))
+                data_fixed["JOBS"][job]["FILE"] = _preserve_prov(_file_prov_src, stripped)
                 if len(files) > 1:
-                    data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = [file.strip(" ") for file in files[1:]]
+                    data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = [
+                        _preserve_prov(file_orig, f.strip(" ")) for f in files[1:]
+                    ]
 
             if "ADDITIONAL_FILES" not in data_fixed["JOBS"][job] and must_exists:
                 data_fixed["JOBS"][job]["ADDITIONAL_FILES"] = []
@@ -587,7 +771,7 @@ class AutosubmitConfig(object):
                 # Truncate SS to "HH:MM"
                 Log.warning(
                     f"Wallclock {wallclock} is in HH:MM:SS format. Autosubmit does not support the seconds. Truncating to HH:MM")
-                data_fixed["JOBS"][job]["WALLCLOCK"] = ":".join(wallclock.split(":")[:2])
+                data_fixed["JOBS"][job]["WALLCLOCK"] = _preserve_prov(wallclock, ":".join(wallclock.split(":")[:2]))
 
     @staticmethod
     def _normalize_dependencies(dependencies: Union[str, dict]) -> dict:
@@ -608,27 +792,41 @@ class AutosubmitConfig(object):
         aux_dependencies = {}
         if isinstance(dependencies, str):
             for dependency in dependencies.upper().split(" "):
-                aux_dependencies[dependency] = {}
+                aux_dependencies[_preserve_prov(dependencies, dependency)] = {}
         elif isinstance(dependencies, dict):
             for dependency, dependency_data in dependencies.items():
-                aux_dependencies[dependency.upper()] = dependency_data
-                if type(dependency_data) is dict and dependency_data.get("STATUS", None):
-                    dependency_data["STATUS"] = dependency_data["STATUS"].upper()
+                aux_dependencies[_preserve_prov(dependency, dependency.upper())] = dependency_data
+                if isinstance(dependency_data, dict) and dependency_data.get("STATUS", None):
+                    status_orig = dependency_data["STATUS"]
+                    status_upper = _preserve_prov(status_orig, status_orig.upper())
                     if not dependency_data.get("ANY_FINAL_STATUS_IS_VALID", False):
-                        if dependency_data["STATUS"][-1] == "?":
-                            dependency_data["STATUS"] = dependency_data["STATUS"][:-1]
-                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
-                        elif dependency_data["STATUS"] not in ["READY", "DELAYED", "PREPARED", "SKIPPED", "FAILED",
-                                                               "COMPLETED"]:  # May change in future issues.
-                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = True
+                        if isinstance(status_upper, str) and status_upper.endswith("?"):
+                            status_upper = _preserve_prov(status_upper, status_upper[:-1])
+                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = _preserve_prov(status_orig, True)
+                        elif str(status_upper) not in ["READY", "DELAYED", "PREPARED", "SKIPPED", "FAILED",
+                                                       "COMPLETED"]:
+                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = _preserve_prov(status_orig, True)
                         else:
-                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = False
+                            dependency_data["ANY_FINAL_STATUS_IS_VALID"] = _preserve_prov(status_orig, False)
+                    dependency_data["STATUS"] = status_upper
 
         return aux_dependencies
 
     @staticmethod
     def _normalize_files(files: Union[str, list[str]]) -> list[str]:
-        if type(files) is not list:
+        """Split a FILE value into a list of individual file paths.
+
+        When *files* is already a list (e.g. a YAML block-sequence), it is
+        returned as-is so that ``StrWithProvenance`` items keep their metadata.
+
+        When *files* is a scalar string (comma- or space-separated paths), the
+        result of ``str.split()`` consists of plain ``str`` items — provenance on
+        the original ``StrWithProvenance`` scalar is intentionally *not*
+        propagated here because the caller (``_normalize_jobs_section``) is
+        responsible for re-attaching the parent provenance with
+        ``_preserve_prov(file_orig, item)`` for each split fragment.
+        """
+        if not isinstance(files, list):
             if ',' in files:
                 files = files.split(",")
             elif ' ' in files:
@@ -638,15 +836,32 @@ class AutosubmitConfig(object):
         return files
 
     def dict_replace_value(self, d: dict, old: str, new: str, index: int, section_names: list) -> dict:
+        """Replace *old* with *new* inside the nested dict *d*, preserving WithProvenance.
+
+        Two substitution modes:
+
+        * **Whole-value** (``d[key] == old`` exactly): if *new* already carries
+          provenance via :func:`_preserve_prov`.
+
+        Both scalar and list-item variants follow the same logic.
+        """
         current_section = section_names.pop()
         if d.get(current_section, None) is None:
             return d
         if isinstance(d[current_section], dict):
             d[current_section] = self.dict_replace_value(d[current_section], old, new, index, section_names)
         elif isinstance(d[current_section], list):
-            d[current_section][index] = d[current_section][index].replace(old[index], new)
+            item = d[current_section][index]
+            old_item = old[index] if isinstance(old, list) else old
+            if str(item) == str(old_item):
+                d[current_section][index] = new if hasattr(new, 'provenance') else _preserve_prov(item, new)
+            else:
+                d[current_section][index] = _preserve_prov(item, item.replace(old_item, new))
         elif isinstance(d[current_section], str) and d[current_section] == old:
-            d[current_section] = d[current_section].replace(old, new)
+            d[current_section] = new if hasattr(new, 'provenance') else _preserve_prov(d[current_section], new)
+        elif isinstance(d[current_section], str):
+            original = d[current_section]
+            d[current_section] = _preserve_prov(original, original.replace(old, new))
         return d
 
     def convert_list_to_string(self, data):
@@ -1491,11 +1706,13 @@ class AutosubmitConfig(object):
             if type(parser['EXPERIMENT'].get('CHUNKSIZE', "-1")) not in [int]:
                 if parser['EXPERIMENT']['CHUNKSIZE'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CHUNKSIZE is not defined"]]
-                parser['EXPERIMENT']['CHUNKSIZE'] = int(parser['EXPERIMENT']['CHUNKSIZE'])
+                _cs = parser['EXPERIMENT']['CHUNKSIZE']
+                parser['EXPERIMENT']['CHUNKSIZE'] = _preserve_prov(_cs, int(_cs))
             if type(parser['EXPERIMENT'].get('NUMCHUNKS', "-1")) not in [int]:
                 if parser['EXPERIMENT']['NUMCHUNKS'] == "-1":
                     self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.NUMCHUNKS is not defined"]]
-                parser['EXPERIMENT']['NUMCHUNKS'] = int(parser['EXPERIMENT']['NUMCHUNKS'])
+                _nc = parser['EXPERIMENT']['NUMCHUNKS']
+                parser['EXPERIMENT']['NUMCHUNKS'] = _preserve_prov(_nc, int(_nc))
             if parser['EXPERIMENT'].get('CALENDAR', "").lower() not in ['standard', 'noleap']:
                 self.wrong_config["Expdef"] += [['experiment', "Mandatory EXPERIMENT.CALENDAR choice is invalid"]]
         if parser.get('PROJECT', "") == "":
@@ -1758,8 +1975,10 @@ class AutosubmitConfig(object):
         """
         for key, value in os.environ.items():
             if key.startswith("AS_ENV"):
-                parameters[key] = value
-        parameters["AS_ENV_CURRENT_USER"] = os.environ.get("SUDO_USER", os.environ.get("USER", None))
+                parameters[key] = _wrap_with_source(value, f"environment:${key}")
+        user = os.environ.get("SUDO_USER", os.environ.get("USER", None))
+        user_var = "SUDO_USER" if os.environ.get("SUDO_USER") else "USER"
+        parameters["AS_ENV_CURRENT_USER"] = _wrap_with_source(user, f"environment:${user_var}")
         return parameters
 
     def needs_reload(self) -> bool:
@@ -1824,10 +2043,17 @@ class AutosubmitConfig(object):
                 del self.experiment_data["AS_TEMP"]
             # IF expid and hpcarch are not defined, use the ones from the minimal.yml file
             self.deep_add_missing_starter_conf(self.experiment_data, starter_conf)
-            self.experiment_data['ROOTDIR'] = os.path.join(
-                BasicConfig.LOCAL_ROOT_DIR, self.expid)
-            self.experiment_data['PROJDIR'] = self.get_project_dir()
-            self.experiment_data.update(BasicConfig().props())
+            self.experiment_data['ROOTDIR'] = _wrap_with_source(
+                os.path.join(BasicConfig.LOCAL_ROOT_DIR, self.expid),
+                f"computed:BasicConfig.LOCAL_ROOT_DIR/{self.expid}",
+            )
+            self.experiment_data['PROJDIR'] = _wrap_with_source(
+                self.get_project_dir(),
+                f"computed:BasicConfig.LOCAL_ROOT_DIR/{self.expid}/proj",
+            )
+            _bc_props = BasicConfig().props()
+            _wrap_dict_with_source(_bc_props, "autosubmit.config.BasicConfig")
+            self.experiment_data.update(_bc_props)
             self.experiment_data = self.normalize_variables(self.experiment_data, must_exists=True, raise_exception=True)
             self.experiment_data = self.deep_read_loops(self.experiment_data)
             self.experiment_data = self.substitute_dynamic_variables(self.experiment_data, in_the_end=True)
@@ -1884,11 +2110,15 @@ class AutosubmitConfig(object):
         project_dir = Path(self.get_project_dir())
         if project_dir.joinpath(".git").exists():
             with suppress(KeyError, ValueError, UnicodeDecodeError):
-                self.experiment_data["AUTOSUBMIT"]["WORKFLOW_COMMIT"] = subprocess.check_output(
+                commit = subprocess.check_output(
                     "git rev-parse HEAD",
                     cwd=project_dir,
                     shell=True
                 ).decode(locale.getpreferredencoding()).strip("\n")
+                self.experiment_data["AUTOSUBMIT"]["WORKFLOW_COMMIT"] = _wrap_with_source(
+                    commit,
+                    f"git:{project_dir}/.git/HEAD",
+                )
 
     def load_current_hpcarch_parameters(self, parameters: Optional[dict] = None) -> None:
         """Load custom HPCARCH parameters.
@@ -1902,9 +2132,10 @@ class AutosubmitConfig(object):
         target = parameters if parameters is not None else self.experiment_data
 
         for name, value in hpcarch_data.items():
-            target[f"HPC{name}"] = value
+            source = f"computed:PLATFORMS.{hpcarch}.{name}"
+            target[f"HPC{name}"] = _wrap_with_source(value, source) if not hasattr(value, 'provenance') else value
 
-        target["HPCARCH"] = hpcarch
+        target["HPCARCH"] = _wrap_with_source(hpcarch, f"computed:DEFAULT.HPCARCH")
 
         scratch = hpcarch_data.get("SCRATCH_DIR", "")
         project = hpcarch_data.get("SCRATCH_PROJECT_DIR", hpcarch_data.get("PROJECT", ""))
@@ -1919,8 +2150,14 @@ class AutosubmitConfig(object):
             target["HPCLOGDIR"] = target["HPCROOTDIR"] / f"LOG_{self.expid}"
 
         if target.get("HPCROOTDIR", None) and target.get("HPCLOGDIR", None):
-            target["HPCROOTDIR"] = str(target["HPCROOTDIR"])
-            target["HPCLOGDIR"] = str(target["HPCLOGDIR"])
+            target["HPCROOTDIR"] = _wrap_with_source(
+                str(target["HPCROOTDIR"]),
+                f"computed:PLATFORMS.{hpcarch}.SCRATCH_DIR+PROJECT+USER/{self.expid}",
+            )
+            target["HPCLOGDIR"] = _wrap_with_source(
+                str(target["HPCLOGDIR"]),
+                f"computed:HPCROOTDIR/LOG_{self.expid}",
+            )
 
         self.substitute_dynamic_variables(target)
 
@@ -1937,8 +2174,11 @@ class AutosubmitConfig(object):
 
             try:
                 with open(self.metadata_folder.joinpath("experiment_data.yml"), 'w') as stream:
-                    # Not using typ="safe" to preserve the readability of the file
-                    YAML().dump(self.experiment_data, stream)
+                    # dump_yaml writes inline provenance comments (file/line/col)
+                    # and correctly serialises NoneWithProvenance as empty YAML
+                    # values rather than ruamel anchor/alias references (*id001).
+                    from yaml_provenance import dump_yaml
+                    dump_yaml(self.experiment_data, stream=stream)
                 self.metadata_folder.joinpath("experiment_data.yml").chmod(0o755)
             except Exception as e:
                 Log.warning(f"Failed to save experiment_data.yml: {str(e)}")

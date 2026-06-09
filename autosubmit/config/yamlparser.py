@@ -17,6 +17,24 @@
 
 
 from ruamel.yaml import YAML
+from yaml_provenance import (
+    load_yaml,
+    configure,
+    ProvenanceConfig,
+)
+
+# ---------------------------------------------------------------------------
+# yaml-provenance integration
+# ---------------------------------------------------------------------------
+# Every value loaded from a YAML file becomes a ``WithProvenance`` subclass of
+# its native type (str, int, …).  This means any downstream code can inspect
+# *which* file, line and column a value originated from without any changes to
+# the rest of Autosubmit.
+#
+# Enable full provenance history so merges across multiple YAML files preserve
+# a complete chain of origin information.
+# ---------------------------------------------------------------------------
+configure(ProvenanceConfig(track_history=True))
 
 
 class YAMLParserFactory:
@@ -32,3 +50,19 @@ class YAMLParser(YAML):
     def __init__(self):
         self.data = []
         super(YAMLParser, self).__init__(typ="rt")
+
+    def load(self, stream):
+        """Load YAML from *stream*, attaching provenance metadata.
+
+        The returned mapping is a ``DictWithProvenance`` instance where every
+        leaf value carries its source ``yaml_file``, ``line`` and ``col``.
+        These survive through subsequent ``dict`` operations because
+        ``WithProvenance`` objects are transparent subclasses of their native
+        Python types.
+
+        :param stream: An open file-like object (with ``.name`` attribute),
+            or a ``str``/``pathlib.Path`` pointing to the YAML file.
+        :return: Parsed mapping (``DictWithProvenance`` or plain ``dict``).
+        """
+        result = load_yaml(stream)
+        return result if result is not None else {}
