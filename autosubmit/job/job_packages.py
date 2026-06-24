@@ -76,8 +76,8 @@ class JobPackageBase(object):
         self.x11_options = jobs[0].x11_options
         # Scheduler manages the timeout, this is for platforms without scheduler
         # Wrappers are only allowed within a scheduler and timeout is calculated differently there
-        self.timeout = max(job.wallclock_in_seconds for job in jobs) if jobs[0].platform.type in ["PS",
-                                                                                                  "LOCAL"] else None
+        self.timeout = max(job.wallclock_in_seconds for job in jobs) if jobs[0].platform.type.lower() in ["ps",
+                                                                                                          "local"] else None
         self.x11 = jobs[0].x11
         self.het = dict()
         self._num_processors = '0'
