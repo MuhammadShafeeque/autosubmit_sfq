@@ -339,7 +339,7 @@ class Log:
         :param level: new level for console
         :return: None
         """
-        if type(level) is str:
+        if isinstance(level, str):
             level = getattr(Log, level)
         Log.console_handler.level = cast(int, level)
 

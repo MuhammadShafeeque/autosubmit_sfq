@@ -221,13 +221,13 @@ class DicJobs:
             self.build_job(section, priority, date, member, chunk, default_job_type, section_data, splits, split)
 
     def update_jobs_filtered(self, current_jobs, next_level_jobs):
-        if type(next_level_jobs) is dict:
+        if isinstance(next_level_jobs, dict):
             for key in next_level_jobs.keys():
                 if key not in current_jobs:
                     current_jobs[key] = next_level_jobs[key]
                 else:
                     current_jobs[key] = self.update_jobs_filtered(current_jobs[key], next_level_jobs[key])
-        elif type(next_level_jobs) is list:
+        elif isinstance(next_level_jobs, list):
             current_jobs.extend(next_level_jobs)
         else:
             current_jobs.append(next_level_jobs)
@@ -250,7 +250,7 @@ class DicJobs:
             value = jobs.get(key, None)
             if value is None:
                 continue
-            if type(value) is list:
+            if isinstance(value, list):
                 final_jobs_list.extend(value)
             else:
                 jobs_aux = self.update_jobs_filtered(jobs_aux, value)
@@ -337,7 +337,7 @@ class DicJobs:
                 if "previous" in filters_to_of_parent.get("SPLITS_TO", ""):
                     result = [result] if result else []
 
-            return set(result) if type(result) is list else {result}
+            return set(result) if isinstance(result, list) else {result}
 
         # Simple 1-to-1 * mapping
         if job.split is None or job.split <= 0:
@@ -424,7 +424,7 @@ class DicJobs:
         """
         if not jobs:
             return {}
-        if type(jobs) is list:
+        if isinstance(jobs, list):
             final_jobs_list.extend(jobs)
             return {}
         return self._filter_level(
@@ -523,9 +523,9 @@ class DicJobs:
 
         dic = self._dic[section]
         # once jobs
-        if type(dic) is list:
+        if isinstance(dic, list):
             jobs = dic
-        elif type(dic) is not dict:
+        elif not isinstance(dic, dict):
             jobs.append(dic)
         else:
             if date is not None and len(str(date)) > 0:
@@ -555,10 +555,10 @@ class DicJobs:
         if date not in dic:
             return jobs
         dic = dic[date]
-        if type(dic) is list:
+        if isinstance(dic, list):
             for job in dic:
                 jobs.append(job)
-        elif type(dic) is not dict:
+        elif not isinstance(dic, dict):
             jobs.append(dic)
         else:
             if member is not None and len(str(member)) > 0:
@@ -573,7 +573,7 @@ class DicJobs:
         if member not in dic:
             return jobs
         dic = dic[member]
-        if type(dic) is not dict:
+        if not isinstance(dic, dict):
             jobs.append(dic)
         else:
             if chunk is not None and len(str(chunk)) > 0:

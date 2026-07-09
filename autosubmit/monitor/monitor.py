@@ -565,7 +565,7 @@ class Monitor:
                     log_out = ""
                     log_err = ""
                     if job.status in [Status.FAILED, Status.COMPLETED]:
-                        if type(job.local_logs) is not tuple:
+                        if not isinstance(job.local_logs, tuple):
                             job.local_logs = ("", "")
                         log_out = str(Path(path) / job.local_logs[0]) if job.local_logs[0] else ""
                         log_err = str(Path(path) / job.local_logs[1]) if job.local_logs[1] else ""

@@ -1245,7 +1245,7 @@ class ParamikoPlatform(Platform):
         self.transport.accept()
         while not session.exit_status_ready():
             with suppress(Exception):
-                if type(self.poller) is not list:
+                if not isinstance(self.poller, list):
                     if sys.platform != "linux":
                         poller = self.poller.kqueue()  # type: ignore
                     else:

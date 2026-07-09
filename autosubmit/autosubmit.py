@@ -1697,7 +1697,7 @@ class Autosubmit:
                 date_format = 'M'
         wrapper_jobs = dict()
         for wrapper_section, wrapper_data in as_conf.experiment_data.get("WRAPPERS", {}).items():
-            if type(wrapper_data) is not dict:
+            if not isinstance(wrapper_data, dict):
                 continue
             wrapper_jobs[wrapper_section] = as_conf.get_wrapper_jobs(wrapper_data)
         Log.info("Aux Job_list was generated successfully")
@@ -4373,7 +4373,7 @@ class Autosubmit:
 
                     for wrapper_name, wrapper_parameters in as_conf.get_wrappers().items():
                         # continue if it is a global option (non-dict)
-                        if type(wrapper_parameters) is not dict:
+                        if not isinstance(wrapper_parameters, dict):
                             continue
                         wrapper_jobs[wrapper_name] = as_conf.get_wrapper_jobs(wrapper_parameters)
 

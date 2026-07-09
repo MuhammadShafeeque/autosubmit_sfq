@@ -539,19 +539,19 @@ class Platform:
 
     @property
     def allow_arrays(self):
-        if type(self._allow_arrays) is bool and self._allow_arrays:
+        if isinstance(self._allow_arrays, bool) and self._allow_arrays:
             return True
         return self._allow_arrays == "true"
 
     @property
     def allow_wrappers(self):
-        if type(self._allow_wrappers) is bool and self._allow_wrappers:
+        if isinstance(self._allow_wrappers, bool) and self._allow_wrappers:
             return True
         return self._allow_wrappers == "true"
 
     @property
     def allow_python_jobs(self):
-        if type(self._allow_python_jobs) is bool and self._allow_python_jobs:
+        if isinstance(self._allow_python_jobs, bool) and self._allow_python_jobs:
             return True
         return self._allow_python_jobs == "true"
 

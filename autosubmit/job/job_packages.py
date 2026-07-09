@@ -365,14 +365,14 @@ class JobPackageThread(JobPackageBase):
                 wr_custom_directives = configuration.experiment_data["WRAPPERS"].get(self.current_wrapper_section,
                                                                                      {}).get("CUSTOM_DIRECTIVES", [])
                 # parse custom_directives
-                if type(wr_custom_directives) is list:
+                if isinstance(wr_custom_directives, list):
                     wr_custom_directives = json.dumps(wr_custom_directives)
                 wr_custom_directives = wr_custom_directives.replace("\'", "\"").strip("[]").strip(", ")
                 if wr_custom_directives == '':
                     if jobs[0].custom_directives is None:
                         jobs[0].custom_directives = ''
                     wr_custom_directives = jobs[0].custom_directives
-                    if type(wr_custom_directives) is list:
+                    if isinstance(wr_custom_directives, list):
                         wr_custom_directives = json.dumps(wr_custom_directives)
                     wr_custom_directives = wr_custom_directives.replace("\'", "\"").strip("[]").strip(", ")
                 if wr_custom_directives != '':

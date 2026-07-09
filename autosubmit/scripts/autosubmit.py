@@ -120,6 +120,6 @@ def main():
         Log.error(f"This is the experiment: {expid} which had an issue with the command: {command} and it is currently using the Autosubmit Version: {version}.")
         return_value = exit_from_error(e)
     # TODO: we need to define whether the function called here will return an int or bool
-    if type(return_value) is bool:
+    if isinstance(return_value, bool):
         return_value = 0 if return_value else 1
     return return_value

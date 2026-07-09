@@ -92,7 +92,7 @@ def autosubmit_parameter(func=None, *, name, group: Optional[str] = None):
         PARAMETERS[group] = defaultdict(defaultdict)
 
     names = name
-    if type(name) is not list:
+    if not isinstance(name, list):
         names = [name]
 
     for parameter_name in names:

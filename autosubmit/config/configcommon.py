@@ -869,7 +869,7 @@ class AutosubmitConfig(object):
     def convert_list_to_string(self, data):
         """Convert a list to a string
         """
-        if type(data) is dict:
+        if isinstance(data, dict):
             for key, val in data.items():
                 if isinstance(val, list):
                     data[key] = ",".join(val)
@@ -938,7 +938,7 @@ class AutosubmitConfig(object):
         filenames_to_load["POST"] = []
         if custom_conf_directive is not None:
             # Check if directive is a dictionary
-            if type(custom_conf_directive) is not dict:
+            if not isinstance(custom_conf_directive, dict):
                 if isinstance(custom_conf_directive, str) and custom_conf_directive != "":
                     if ',' in custom_conf_directive:
                         filenames_to_load["PRE"] = custom_conf_directive.split(',')
@@ -1553,7 +1553,7 @@ class AutosubmitConfig(object):
         if parser_data.get("MAIL", "") != "":
             if str(parser_data["MAIL"].get("NOTIFICATIONS", "false")).lower() == "true":
                 mails = parser_data["MAIL"].get("TO", "")
-                if type(mails) is list:
+                if isinstance(mails, list):
                     pass
                 elif "," in mails:
                     mails = mails.split(',')
@@ -1652,7 +1652,7 @@ class AutosubmitConfig(object):
 
             dependencies = section_data.get('DEPENDENCIES', '')
             if dependencies != "":
-                if type(dependencies) is dict:
+                if isinstance(dependencies, dict):
                     for dependency, values in dependencies.items():
                         if '-' in dependency:
                             dependency = dependency.split('-')[0]
@@ -1784,7 +1784,7 @@ class AutosubmitConfig(object):
             wrappers = {}
         for wrapper_name, wrapper_values in wrappers.items():
             # continue if it is a global option (non-dicT)
-            if type(wrapper_values) is not dict:
+            if not isinstance(wrapper_values, dict):
                 continue
             jobs_in_wrapper = wrapper_values.get('JOBS_IN_WRAPPER', [])
             for section in jobs_in_wrapper:
@@ -1980,12 +1980,12 @@ class AutosubmitConfig(object):
         :param parameter:
         :return: list
         """
-        if type(self.starter_conf[parameter]) is str:
+        if isinstance(self.starter_conf[parameter], str):
             if "," in self.starter_conf[parameter]:
                 list_parameters = self.starter_conf[parameter].split(",")
             else:
                 list_parameters = [self.starter_conf[parameter]]
-        elif type(self.starter_conf[parameter]) is list:
+        elif isinstance(self.starter_conf[parameter], list):
             list_parameters = self.starter_conf[parameter]
         else:
             list_parameters = list(self.starter_conf[parameter])
@@ -2249,7 +2249,7 @@ class AutosubmitConfig(object):
                 if key not in last_run_data.keys():
                     differences[key] = val
                 else:
-                    if type(last_run_data[key]) is not dict:
+                    if not isinstance(last_run_data[key], dict):
                         differences[key] = val
                     elif len(last_run_data[key]) == 0 and len(last_run_data[key]) == len(current_data[key]):
                         continue
@@ -2267,7 +2267,7 @@ class AutosubmitConfig(object):
                 if key not in current_data.keys():
                     differences[key] = val
                 else:
-                    if type(current_data[key]) is dict and len(current_data[key]) == 0:
+                    if isinstance(current_data[key], dict) and len(current_data[key]) == 0:
                         diff = self.detailed_deep_diff(current_data[key], val, level)
                         if diff:
                             differences[key] = diff
@@ -2568,7 +2568,7 @@ class AutosubmitConfig(object):
         date_list = list()
         date_value = str(self.get_section(['EXPERIMENT', 'DATELIST'], "20220401"))
         # Allows to use the old format for define a list.
-        if type(date_value) is not list:
+        if not isinstance(date_value, list):
             if not date_value.startswith("["):
                 string = f'[{date_value}]'
             else:
@@ -2576,7 +2576,7 @@ class AutosubmitConfig(object):
             split_string = nested_expr('[', ']').parse_string(string).asList()
             string_date = None
             for split in split_string[0]:
-                if type(split) is list:
+                if isinstance(split, list):
                     for split_in in split:
                         if split_in.find("-") != -1:
                             split_numbers = split_in.split("-")
@@ -2651,7 +2651,7 @@ class AutosubmitConfig(object):
         split_string = nested_expr('[', ']').parse_string(string).asList()
         string_member = None
         for split in split_string[0]:
-            if type(split) is list:
+            if isinstance(split, list):
                 for split_in in split:
                     if split_in.find("-") != -1:
                         split_numbers = split_in.split("-")

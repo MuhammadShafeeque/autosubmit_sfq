@@ -665,7 +665,7 @@ class JobList(object):
         """
         filters = []
         if level_to_check == "DATES_FROM":
-            if type(value_to_check) is not str:
+            if not isinstance(value_to_check, str):
                 # need to convert in some cases
                 value_to_check = date2str(value_to_check, "%Y%m%d")
             try:
@@ -728,8 +728,8 @@ class JobList(object):
             if "CHUNKS_FROM" in filter:
                 filters_to_apply_c = self._check_chunks({"CHUNKS_FROM": (
                     filter.pop("CHUNKS_FROM"))}, current_job)
-                if len(filters_to_apply_c) > 0 and (type(filters_to_apply_c) is not list or (
-                        type(filters_to_apply_c) is list and len(filters_to_apply_c[0]) > 0)):
+                if len(filters_to_apply_c) > 0 and (not isinstance(filters_to_apply_c, list) or (
+                        isinstance(filters_to_apply_c, list) and len(filters_to_apply_c[0]) > 0)):
                     filters_to_apply[i].update(filters_to_apply_c)
             # IGNORED
             if "SPLITS_FROM" in filter:
@@ -836,7 +836,7 @@ class JobList(object):
                     skip = False
                     # check if any element is natural or none
                     for ele in parsed_element:
-                        if type(ele) is str and ele.lower() in ["natural", "none"]:
+                        if isinstance(ele, str) and ele.lower() in ["natural", "none"]:
                             skip = True
                     if skip and len(unified_filter[filter_type]) > 0:
                         continue
@@ -1659,7 +1659,7 @@ class JobList(object):
         sections_running_type_map = dict()
         if wrapper_jobs is not None and len(str(wrapper_jobs)) > 0:
             # TODO: Removing this causes unit tests to fail, need to investigate why in another PR
-            if type(wrapper_jobs) is not list:
+            if not isinstance(wrapper_jobs, list):
                 if "&" in wrapper_jobs:
                     char = "&"
                 else:
@@ -3098,7 +3098,7 @@ class JobList(object):
             Log.debug(f"Reading rerun dependencies for {job_section} jobs")
             if not is_none_like(as_conf.jobs_data[job_section].get('DEPENDENCIES', None)):
                 dependencies_keys = as_conf.jobs_data[job_section].get('DEPENDENCIES', {})
-                if type(dependencies_keys) is str:
+                if isinstance(dependencies_keys, str):
                     dependencies_keys = dependencies_keys.upper().split()
                 if dependencies_keys is None:
                     dependencies_keys = []
