@@ -30,6 +30,7 @@ from typing import List, Dict, Tuple, Any, Optional, Union
 
 from bscearth.utils.date import date2str, parse_date
 from networkx import DiGraph
+from yaml_provenance import is_none_like
 
 import autosubmit.database.db_structure as DbStructure
 from autosubmit.config.basicconfig import BasicConfig
@@ -2656,7 +2657,7 @@ class JobList(object):
         Log.debug('Updating FAILED jobs')
         if not first_time:
             for job in [job for job in self.get_failed() if not self.is_wrapper_still_running(job)]:
-                if as_conf.jobs_data[job.section].get("RETRIALS", None) is None:
+                if is_none_like(as_conf.jobs_data[job.section].get("RETRIALS", None)):
                     retrials = int(as_conf.get_retrials())
                 else:
                     retrials = int(job.retrials)
@@ -3095,7 +3096,7 @@ class JobList(object):
 
         for job_section in job_sections:
             Log.debug(f"Reading rerun dependencies for {job_section} jobs")
-            if as_conf.jobs_data[job_section].get('DEPENDENCIES', None) is not None:
+            if not is_none_like(as_conf.jobs_data[job_section].get('DEPENDENCIES', None)):
                 dependencies_keys = as_conf.jobs_data[job_section].get('DEPENDENCIES', {})
                 if type(dependencies_keys) is str:
                     dependencies_keys = dependencies_keys.upper().split()

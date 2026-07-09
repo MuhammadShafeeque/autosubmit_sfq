@@ -50,6 +50,7 @@ from ruamel.yaml import YAML
 # instead of "# no provenance".
 # ---------------------------------------------------------------------------
 from yaml_provenance import (
+    is_none_like,
     wrap_computed,
     transfer_provenance,
     annotate_dict,
@@ -847,7 +848,7 @@ class AutosubmitConfig(object):
         Both scalar and list-item variants follow the same logic.
         """
         current_section = section_names.pop()
-        if d.get(current_section, None) is None:
+        if is_none_like(d.get(current_section, None)):
             return d
         if isinstance(d[current_section], dict):
             d[current_section] = self.dict_replace_value(d[current_section], old, new, index, section_names)
@@ -1541,7 +1542,7 @@ class AutosubmitConfig(object):
             if type(parser_data["CONFIG"].get('RETRIALS', 0)) is not int:
                 parser_data["CONFIG"]['RETRIALS'] = int(parser_data["CONFIG"].get('RETRIALS', 0))
 
-        if parser_data.get("STORAGE", None) is None:
+        if is_none_like(parser_data.get("STORAGE", None)):
             parser_data["STORAGE"] = {}
         if parser_data["STORAGE"].get('TYPE', "pkl") not in ['pkl', 'db']:
             self.wrong_config["Autosubmit"] += [['storage',
@@ -1929,7 +1930,7 @@ class AutosubmitConfig(object):
                     # Load next level if any
                     custom_conf_directive = current_data.get('DEFAULT', {}).get('CUSTOM_CONFIG', None)
                     filenames_to_load_level = self.parse_custom_conf_directive(custom_conf_directive)
-                    if current_data.get('DEFAULT', {}).get('CUSTOM_CONFIG', None) is not None:
+                    if not is_none_like(current_data.get('DEFAULT', {}).get('CUSTOM_CONFIG', None)):
                         del current_data["DEFAULT"]["CUSTOM_CONFIG"]
                     filenames_to_load_level["PRE"] = [to_load for to_load in filenames_to_load_level["PRE"] if
                                                       to_load not in self.current_loaded_files]

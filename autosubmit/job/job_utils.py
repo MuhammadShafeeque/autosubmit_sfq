@@ -21,6 +21,7 @@ from typing import Optional, Any, TYPE_CHECKING
 
 from bscearth.utils.date import date2str, chunk_end_date, chunk_start_date
 from networkx.classes import DiGraph
+from yaml_provenance import is_none_like
 
 from autosubmit.helpers.enums import ChunkUnit
 from autosubmit.job.job_common import Status
@@ -450,7 +451,8 @@ class Dependency(object):
         self.sign = sign
         self.delay = delay
         self.splits = splits
-        self.relationships = relationships
+        # Normalize a NoneWithProvenance null to plain None so downstream `is None`/len() checks work.
+        self.relationships = None if is_none_like(relationships) else relationships
 
 
 class SubJob(object):
