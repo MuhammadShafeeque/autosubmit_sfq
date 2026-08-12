@@ -470,7 +470,7 @@ jobs:
         with:
           name: ${{ github.workflow }}
           flags: fast-tests
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
           # Token is not required for public repositories but avoids upload failure due
           # to rate-limiting (but not for PRs opened from forks)
